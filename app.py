@@ -61,9 +61,57 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        '--export-frames',
+        nargs='+',
+        metavar='VIDEO',
+        help='export the given video(s) frame by frame as stills and exit',
+    )
+    parser.add_argument(
+        '--start',
+        type=float,
+        metavar='SECONDS',
+        help='with --export-frames, start of the range (default: the beginning)',
+    )
+    parser.add_argument(
+        '--end',
+        type=float,
+        metavar='SECONDS',
+        help='with --export-frames, end of the range (default: the end)',
+    )
+    parser.add_argument(
+        '--every',
+        type=int,
+        default=1,
+        metavar='N',
+        help='with --export-frames, keep one frame out of N (default: 1)',
+    )
+    parser.add_argument(
+        '--format',
+        choices=['png', 'jpg'],
+        default='png',
+        help='with --export-frames, the image format (default: png)',
+    )
+    parser.add_argument(
+        '--upscale',
+        type=float,
+        metavar='FACTOR',
+        help=(
+            'with --export-frames, upscale each frame by this factor; '
+            'below 1.0 downscales'
+        ),
+    )
+    parser.add_argument(
+        '--zip',
+        action='store_true',
+        help='with --export-frames, also bundle the stills into a zip',
+    )
+    parser.add_argument(
         '--output-dir',
         metavar='DIR',
-        help='with --reverse, where to write the results (default: a temp dir)',
+        help=(
+            'with --reverse or --export-frames, where to write the results '
+            '(default: a temp dir)'
+        ),
     )
     parser.add_argument(
         '--port',
@@ -122,13 +170,85 @@ def run_reverse_cli(args):
     return 1 if failed else 0
 
 
+def run_export_frames_cli(args):
+    """Export frames from the command line. Returns a process exit code."""
+    missing = [path for path in args.export_frames if not os.path.isfile(path)]
+    if missing:
+        for path in missing:
+            print(f"ERROR: no such file: {path}")
+        return 1
+
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+    from processors.frame_exporter import export_frames
+
+    # The range mode follows from which bounds were given, so the CLI does not
+    # need a separate --range-mode flag.
+    if args.start is not None and args.end is not None:
+        range_mode = 'range'
+    elif args.start is not None:
+        range_mode = 'from'
+    elif args.end is not None:
+        range_mode = 'to'
+    else:
+        range_mode = 'all'
+
+    failed = 0
+    for path in args.export_frames:
+        name = os.path.basename(path)
+        output_dir = args.output_dir
+        if output_dir and len(args.export_frames) > 1:
+            output_dir = os.path.join(output_dir, os.path.splitext(name)[0])
+
+        try:
+            result = export_frames(
+                path,
+                output_dir=output_dir,
+                range_mode=range_mode,
+                start_time=args.start,
+                end_time=args.end,
+                every_n=args.every,
+                image_format=args.format,
+                upscale=args.upscale is not None,
+                scale_factor=args.upscale or 1.0,
+                make_zip=args.zip,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep going through the list
+            print(f"FAILED  {name}: {exc}")
+            failed += 1
+            continue
+
+        print(f"OK      {name}: {result['frame_count']} frames -> {result['output_dir']}")
+        if result['upscaled']:
+            print(
+                f"        {result['source_resolution'][0]}x{result['source_resolution'][1]}"
+                f" -> {result['resolution'][0]}x{result['resolution'][1]}"
+                f" ({result['scale_factor']}x)"
+            )
+        if result['zip_path']:
+            print(f"        zip -> {result['zip_path']}")
+
+    print()
+    total = len(args.export_frames)
+    print(f"{total - failed}/{total} exported")
+    return 1 if failed else 0
+
+
 def main():
     """Main application entry point"""
     args = parse_args()
 
+    if args.reverse and args.export_frames:
+        print("ERROR: --reverse and --export-frames cannot be combined")
+        sys.exit(2)
+
     # Dependencies are needed by both modes, so check before branching.
     if not check_dependencies():
         sys.exit(1)
+
+    if args.export_frames:
+        sys.exit(run_export_frames_cli(args))
 
     if args.reverse:
         sys.exit(run_reverse_cli(args))

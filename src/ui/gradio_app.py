@@ -23,6 +23,7 @@ from utils.video_processor import VideoProcessor, format_duration
 from processors.spatial_upscaler import create_upscaler
 from processors.temporal_interpolator import create_interpolator
 from processors.video_reverser import COMBINE_MODES, reverse_batch
+from processors.frame_exporter import IMAGE_FORMATS, clear_export_dir, export_frames
 
 # Global state
 current_upscaler = None
@@ -321,6 +322,68 @@ def process_reverse(files, keep_frames, combine_mode, progress=gr.Progress()):
         last.get("combined_path"),
         gallery,
     )
+
+
+# A long export can run to thousands of stills; the browser only gets a slice,
+# and the zip or the folder carries the rest.
+GALLERY_PREVIEW_LIMIT = 60
+
+
+def process_export_frames(
+    video, range_mode, start_time, end_time, every_n,
+    image_format, jpeg_quality, upscale, scale, make_zip,
+    progress=gr.Progress(),
+):
+    """Export a video's frames as stills, optionally upscaling each one."""
+    if video is None:
+        return "No video uploaded.", [], None
+
+    def on_progress(done, total):
+        progress(done / total if total else 0, desc=f"Exporting frame {done}/{total}")
+
+    # Each run starts from an empty folder so a shorter range cannot leave
+    # stills from a previous, longer one behind.
+    output_dir = os.path.join(
+        tempfile.gettempdir(), "video_frame_exports", Path(video).stem
+    )
+    clear_export_dir(output_dir)
+
+    try:
+        result = export_frames(
+            video,
+            output_dir=output_dir,
+            range_mode=range_mode,
+            start_time=start_time,
+            end_time=end_time,
+            every_n=int(every_n),
+            image_format=image_format,
+            jpeg_quality=int(jpeg_quality),
+            upscale=bool(upscale),
+            scale_factor=float(scale),
+            make_zip=bool(make_zip),
+            progress_callback=on_progress,
+        )
+    except Exception as exc:  # noqa: BLE001 - report it in the UI
+        logger.error(f"Frame export failed: {exc}", exc_info=True)
+        return f"❌ {exc}", [], None
+
+    first, last = result["range"]
+    fps = result["fps"] or 1.0
+    report = (
+        f"✅ {result['frame_count']} frames exported in {result['elapsed']:.1f}s\n"
+        f"🎬 Source frames {first}-{last} ({first / fps:.2f}s - {last / fps:.2f}s)\n"
+        f"📐 {result['source_resolution'][0]}x{result['source_resolution'][1]}"
+        f" → {result['resolution'][0]}x{result['resolution'][1]}"
+    )
+    if result["upscaled"]:
+        report += f" (upscaled {result['scale_factor']}x)"
+    report += f"\n📁 {result['output_dir']}"
+
+    gallery = result["frames"][:GALLERY_PREVIEW_LIMIT]
+    if len(result["frames"]) > GALLERY_PREVIEW_LIMIT:
+        report += f"\n👁️ Showing the first {GALLERY_PREVIEW_LIMIT} of {result['frame_count']}"
+
+    return report, gallery, result["zip_path"]
 
 
 def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal, progress=gr.Progress()):
@@ -657,7 +720,113 @@ def create_interface():
                         )
 
             # ============================================================
-            # TAB 4: SETTINGS
+            # TAB 4: EXPORT FRAMES
+            # ============================================================
+            with gr.Tab("🖼️ Export Frames"):
+                gr.Markdown("### Export Frames")
+                gr.Markdown(
+                    "*Write a video's frames out as still images, over the whole "
+                    "clip or a chosen span, optionally upscaling each one.*"
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        export_input = gr.Video(
+                            label="📹 Video Source (mp4, webm, mkv, mov, avi)",
+                        )
+
+                        with gr.Group():
+                            gr.Markdown("### ⏱️ Range")
+                            export_range_mode = gr.Radio(
+                                choices=[
+                                    ("Whole video", "all"),
+                                    ("From a start time", "from"),
+                                    ("Up to an end time", "to"),
+                                    ("Between two times", "range"),
+                                ],
+                                value="all",
+                                label="Which frames to export",
+                            )
+                            with gr.Row():
+                                export_start = gr.Number(
+                                    label="Start (seconds)",
+                                    value=0,
+                                    minimum=0,
+                                    visible=False,
+                                )
+                                export_end = gr.Number(
+                                    label="End (seconds)",
+                                    value=5,
+                                    minimum=0,
+                                    visible=False,
+                                )
+                            export_every_n = gr.Slider(
+                                label="Keep one frame out of",
+                                minimum=1,
+                                maximum=60,
+                                step=1,
+                                value=1,
+                                info="1 = every frame. Raise it to thin out a long export.",
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("### 🖼️ Output")
+                            export_format = gr.Radio(
+                                choices=list(IMAGE_FORMATS),
+                                value="png",
+                                label="Image format",
+                                info="png = lossless, jpg = much smaller",
+                            )
+                            export_quality = gr.Slider(
+                                label="JPEG quality",
+                                minimum=50,
+                                maximum=100,
+                                step=1,
+                                value=95,
+                                visible=False,
+                            )
+                            export_zip = gr.Checkbox(
+                                label="📦 Also bundle the frames into a zip",
+                                value=True,
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("### ⚙️ Upscaling")
+                            export_upscale = gr.Checkbox(
+                                label="✨ Upscale each frame",
+                                value=False,
+                            )
+                            export_scale = gr.Slider(
+                                label="Scale factor",
+                                minimum=0.5,
+                                maximum=8.0,
+                                step=0.1,
+                                value=2.0,
+                                visible=False,
+                                info="<1.0 = Downscale, 2.0/4.0 = Optimal AI, Other = Hybrid (AI+Resize)",
+                            )
+
+                        export_btn = gr.Button("🖼️ Export Frames", variant="primary")
+
+                    with gr.Column(scale=1):
+                        export_status = gr.Textbox(
+                            label="🖼️ Status",
+                            interactive=False,
+                            lines=6,
+                            placeholder="Upload a video, pick a range and press Export...",
+                        )
+                        export_zip_file = gr.File(
+                            label="📦 Frames archive",
+                            interactive=False,
+                        )
+                        export_gallery = gr.Gallery(
+                            label="🖼️ Exported frames",
+                            columns=6,
+                            object_fit="contain",
+                        )
+
+            # ============================================================
+            # TAB 5: SETTINGS
             # ============================================================
             with gr.Tab("⚙️ Advanced Settings"):
                 gr.Markdown("### Advanced Configuration")
@@ -731,6 +900,48 @@ def create_interface():
         # ============================================================
         # EVENT HANDLERS
         # ============================================================
+
+        # Export Frames tab: only show the inputs the chosen options need.
+        def _toggle_range_inputs(mode):
+            return (
+                gr.update(visible=mode in ("from", "range")),
+                gr.update(visible=mode in ("to", "range")),
+            )
+
+        export_range_mode.change(
+            fn=_toggle_range_inputs,
+            inputs=[export_range_mode],
+            outputs=[export_start, export_end],
+        )
+
+        export_format.change(
+            fn=lambda fmt: gr.update(visible=fmt == "jpg"),
+            inputs=[export_format],
+            outputs=[export_quality],
+        )
+
+        export_upscale.change(
+            fn=lambda enabled: gr.update(visible=bool(enabled)),
+            inputs=[export_upscale],
+            outputs=[export_scale],
+        )
+
+        export_btn.click(
+            fn=process_export_frames,
+            inputs=[
+                export_input,
+                export_range_mode,
+                export_start,
+                export_end,
+                export_every_n,
+                export_format,
+                export_quality,
+                export_upscale,
+                export_scale,
+                export_zip,
+            ],
+            outputs=[export_status, export_gallery, export_zip_file],
+        )
 
         # Reverse tab
         reverse_btn.click(

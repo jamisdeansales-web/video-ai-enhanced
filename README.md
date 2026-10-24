@@ -13,6 +13,7 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 ## ✨ Features
 
 - **Reverse videos** frame by frame, in batch, from the UI or the CLI
+- **Export frames** as PNG/JPEG over any time range, optionally upscaled
 
 ### Currently Working (v0.2.0)
 
@@ -299,20 +300,59 @@ Reverses videos frame by frame, merged in from
 Frames are spooled to a temporary directory as lossless PNG rather than held in
 memory, so a long or high-resolution video does not depend on free RAM.
 
+### 🖼️ Export Frames (tab)
+
+Writes a video's frames out as still images, with each frame named after its
+index in the source so an export can always be traced back.
+
+**Range** — pick one of:
+
+| Mode | Exports |
+|------|---------|
+| Whole video | every frame |
+| From a start time | from *start* to the end |
+| Up to an end time | from the beginning to *end* |
+| Between two times | *start* to *end* |
+
+An end past the end of the clip is clamped rather than refused. A start past it
+is an error, as is an empty range.
+
+**Keep one frame out of N** thins a long export out: a 10-minute 30 fps clip is
+18 000 stills at N=1.
+
+**Output** — PNG (lossless) or JPEG with a quality slider, and optionally a zip
+of the whole set for a single download. The gallery previews the first 60; the
+folder and the zip hold them all.
+
+**Upscaling** — tick *Upscale each frame* to run every still through the same
+Real-ESRGAN path as the video upscaler, at any factor from 0.5× (downscale) to
+8×. 2× and 4× go straight through the AI model; other factors are hybrid.
+
 ### Command line
 
-Reversing also works without the browser:
+Reversing and frame export both work without the browser:
 
 ```bash
-# One video
+# Reverse one video
 python app.py --reverse clip.webm
 
 # A batch, keeping the frames, with the original and reversed joined
 python app.py --reverse a.mp4 b.webm --keep-frames --video-loop ab --output-dir out/
 
+# Every frame of a clip as PNG
+python app.py --export-frames clip.webm
+
+# One frame in 3 between 10s and 25s, as JPEG, upscaled 2x, zipped
+python app.py --export-frames clip.mp4 --start 10 --end 25 --every 3 \
+    --format jpg --upscale 2 --zip --output-dir frames/
+
 # Start the web UI on another port, without opening a browser
 python app.py --port 8000 --no-browser
 ```
+
+The range mode follows from which bounds you pass: `--start` alone means "from
+there to the end", `--end` alone means "up to there", both means "between",
+neither means the whole video.
 
 `python app.py --help` lists every option. The exit code is non-zero if any
 input failed.
