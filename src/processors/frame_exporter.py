@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 
+from utils.image_io import check_writable, imread, imwrite
 from utils.video_processor import VideoProcessor
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,11 @@ def export_frames(
         output_dir = str(
             Path(tempfile.gettempdir()) / 'video_frame_exports' / source.stem
         )
-    os.makedirs(output_dir, exist_ok=True)
+    problem = check_writable(output_dir)
+    if problem:
+        raise OSError(
+            'Cannot export frames: %s. Choose another output folder.' % problem
+        )
 
     upscaler = None
     written: List[str] = []
@@ -198,7 +203,9 @@ def export_frames(
             path = os.path.join(
                 output_dir, 'frame_%06d.%s' % (index, image_format)
             )
-            if not cv2.imwrite(path, frame, encode_params):
+            # imwrite here is the Unicode-safe wrapper: cv2.imwrite cannot
+            # write to a path holding non-ASCII characters on Windows.
+            if not imwrite(path, frame, encode_params):
                 raise RuntimeError('Could not write %s' % path)
             written.append(path)
 
@@ -208,7 +215,7 @@ def export_frames(
     if not written:
         raise ValueError('No frames were exported from %s' % video_path)
 
-    resolution = tuple(cv2.imread(written[0]).shape[1::-1])
+    resolution = tuple(imread(written[0]).shape[1::-1])
 
     zip_path = None
     if make_zip:

@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Optional
 
 import cv2
 
+from utils.image_io import imread, imwrite
 from utils.video_processor import VideoProcessor, VideoWriter
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ def _spool_frames(
 
     for index, frame in processor.extract_frames():
         path = os.path.join(spool_dir, 'frame_%06d.png' % index)
-        if not cv2.imwrite(path, frame):
+        if not imwrite(path, frame):
             raise RuntimeError('Could not write frame %d to %s' % (index, path))
         paths.append(path)
 
@@ -122,14 +123,14 @@ def reverse_video(
         )
         try:
             for position, path in enumerate(reversed(frame_paths)):
-                frame = cv2.imread(path)
+                frame = imread(path)
                 if frame is None:
                     raise RuntimeError('Could not read spooled frame %s' % path)
                 writer.write_frame(frame)
 
                 if keep_frames:
                     jpeg = os.path.join(frames_dir, 'frame_%06d.jpg' % position)
-                    cv2.imwrite(jpeg, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                    imwrite(jpeg, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
                     kept_frames.append(jpeg)
         finally:
             writer.close(copy_audio=False)
