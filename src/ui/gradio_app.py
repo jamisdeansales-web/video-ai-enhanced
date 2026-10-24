@@ -19,11 +19,18 @@ logger = logging.getLogger(__name__)
 
 # Import our modules
 from utils.system_manager import get_system_manager
-from utils.video_processor import VideoProcessor, format_duration
+from utils.video_processor import (
+    DEFAULT_CODEC,
+    DEFAULT_CRF,
+    FFMPEG_CODECS,
+    VideoProcessor,
+    format_duration,
+)
 from processors.spatial_upscaler import create_upscaler
 from processors.temporal_interpolator import create_interpolator
 from processors.video_reverser import COMBINE_MODES, reverse_batch
 from processors.frame_exporter import IMAGE_FORMATS, clear_export_dir, export_frames
+from utils.quality_metrics import compare_videos, format_metric_rows
 
 # Global state
 current_upscaler = None
@@ -63,17 +70,20 @@ def parse_model_choice(label):
     return "realesrgan"
 
 
-def build_upscaler(model_name, scale, device='auto'):
+def build_upscaler(model_name, scale, device='auto',
+                   codec=DEFAULT_CODEC, crf=DEFAULT_CRF):
     """Create the right upscaler for the chosen model."""
     if model_name in TEMPORAL_MODELS:
         from processors.temporal_upscaler import create_temporal_upscaler
 
         return create_temporal_upscaler(
-            model_name=model_name, scale_factor=scale, device=device
+            model_name=model_name, scale_factor=scale, device=device,
+            codec=codec, crf=crf,
         )
 
     return create_upscaler(
-        model_name=model_name, scale_factor=scale, device=device
+        model_name=model_name, scale_factor=scale, device=device,
+        codec=codec, crf=crf,
     )
 
 
@@ -423,7 +433,9 @@ def process_export_frames(
     return report, gallery, result["zip_path"]
 
 
-def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal, progress=gr.Progress()):
+def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal,
+                       codec=DEFAULT_CODEC, crf=DEFAULT_CRF, measure_quality=False,
+                       progress=gr.Progress()):
     """Process full video"""
     global current_upscaler
 
@@ -441,7 +453,9 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
         # Create upscaler
         progress(0.05, desc="Loading AI model...")
         try:
-            upscaler = build_upscaler(model_name, float(scale))
+            upscaler = build_upscaler(
+                model_name, float(scale), codec=codec, crf=int(crf)
+            )
         except ImportError as ie:
             if "Real-ESRGAN not available" in str(ie):
                 error_msg = "❌ Real-ESRGAN not available\n\n"
@@ -504,14 +518,25 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
                 ["Avg Time/Frame", f"{metrics['avg_time_per_frame']:.3f}s"],
             ]
 
-            return output_path, status, metrics_data
+            # Quality metrics are sampled, but optical flow over a long clip
+            # still costs real time, so they are opt-in.
+            if measure_quality:
+                progress(0.97, desc="Measuring quality...")
+                try:
+                    quality = compare_videos(video, output_path)
+                    metrics_data.extend(format_metric_rows(quality))
+                except Exception as exc:  # noqa: BLE001 - never lose the video
+                    logger.error("Quality metrics failed: %s", exc, exc_info=True)
+                    metrics_data.append(["Quality metrics", f"failed: {exc}"])
+
+            return output_path, status, metrics_data, video, output_path
         else:
             error_msg = f"❌ Processing failed: {result.get('error', 'Unknown error')}"
-            return None, error_msg, []
+            return None, error_msg, [], None, None
 
     except Exception as e:
         logger.error(f"Error in full processing: {e}", exc_info=True)
-        return None, f"❌ Error: {str(e)}", []
+        return None, f"❌ Error: {str(e)}", [], None, None
 
 
 def create_interface():
@@ -599,6 +624,36 @@ def create_interface():
                                 interactive=False,
                                 placeholder="Will be calculated automatically"
                             )
+
+                        with gr.Group():
+                            gr.Markdown("### 💾 Output")
+
+                            output_codec = gr.Radio(
+                                choices=list(FFMPEG_CODECS) + ["mp4v"],
+                                value=DEFAULT_CODEC,
+                                label="Codec",
+                                info="h264 = compatible everywhere, h265 = smaller, mp4v = legacy fallback",
+                            )
+                            output_crf = gr.Slider(
+                                label="Quality (CRF)",
+                                minimum=0,
+                                maximum=51,
+                                step=1,
+                                value=DEFAULT_CRF,
+                                info="Lower = better and bigger. 18 is near-transparent, 23 the usual default.",
+                            )
+                            measure_quality = gr.Checkbox(
+                                label="📊 Measure quality after processing (PSNR / SSIM / stability)",
+                                value=False,
+                                info="Adds a pass over the result; see the Comparison tab",
+                            )
+
+                        # CRF means nothing to the OpenCV FourCC writer.
+                        output_codec.change(
+                            fn=lambda c: gr.update(visible=c in FFMPEG_CODECS),
+                            inputs=[output_codec],
+                            outputs=[output_crf],
+                        )
 
                         # Interpolation settings
                         with gr.Group():
@@ -1045,9 +1100,18 @@ def create_interface():
                 enable_interpolation,
                 interpolation_model,
                 fps_multiplier,
-                temporal_method
+                temporal_method,
+                output_codec,
+                output_crf,
+                measure_quality
             ],
-            outputs=[video_output, status_text, metrics_display]
+            outputs=[
+                video_output,
+                status_text,
+                metrics_display,
+                original_video,
+                processed_video
+            ]
         )
 
         # Refresh system info

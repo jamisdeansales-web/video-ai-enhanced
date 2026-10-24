@@ -56,10 +56,16 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
   - Reads a run of frames instead of one at a time, for temporal coherence
   - 4× native
 
+- **📊 Quality Metrics** ✅
+  - PSNR, SSIM and motion-compensated temporal stability
+- **💾 H.264 / H.265 output** ✅
+  - CRF quality control, replacing the old mp4v encoder
+
 ### Coming Soon
 
 - **RIFE / DAIN**: frame interpolation
-- **Quality Metrics**: PSNR, SSIM, flickering scores
+- **Resume**: pick a long job back up after an interruption
+- **Queue**: batch several videos in the Processing tab
 - **Batch Processing**: Process multiple videos at once
 
 ## 📋 Requirements
@@ -414,6 +420,51 @@ neither means the whole video.
 
 `python app.py --help` lists every option. The exit code is non-zero if any
 input failed.
+
+### 💾 Output codec
+
+Under **Output** in the Processing tab:
+
+| Codec | Use |
+|-------|-----|
+| `h264` (default) | plays everywhere |
+| `h265` | roughly half the size at the same quality, less universally supported |
+| `mp4v` | legacy fallback, only when ffmpeg is unavailable |
+
+`mp4v` (MPEG-4 Part 2) used to be the only option and is a poor one at high
+resolutions — no modern rate control, large files, visible blocking. On a short
+640×480 test clip h264 came out 1.8× smaller than mp4v; the gap widens sharply
+at 4K.
+
+**CRF** sets quality for the ffmpeg encoders: lower is better and bigger, 18 is
+near-transparent, 23 is the usual default, above ~28 artefacts show. It does
+nothing for `mp4v`, so the slider hides itself.
+
+Frames are piped straight to ffmpeg rather than written through OpenCV, and odd
+output dimensions — which an arbitrary scale factor easily produces — are
+rounded down to even, since H.264/H.265 need that for `yuv420p`.
+
+### 📊 Quality metrics
+
+Tick **Measure quality after processing** in the Processing tab; the results
+land in the **Comparison** tab, which also now shows the source and the result
+side by side.
+
+| Metric | Means |
+|--------|-------|
+| PSNR / SSIM (round-trip) | the result scaled back down, compared with the source. Higher means the upscale stayed faithful rather than inventing detail. |
+| PSNR vs plain resize | distance from simply enlarging with Lanczos. Near-identical values mean the model did little a resize would not have. |
+| Temporal stability | flicker between consecutive frames with motion removed by optical flow. Lower is steadier. |
+
+There is no ground truth at the higher resolution for real footage, so these
+are round-trip and relative measures, not absolute scores. Metrics are sampled
+over 24 frames, not the whole video, and are off by default because the optical
+flow pass costs real time.
+
+The stability figure is reported as an absolute difference rather than a
+percentage when the source barely moves: a near-static clip has a baseline
+around 0.003, against which any result becomes a meaningless four-digit
+percentage.
 
 ## ⚙️ Configuration
 

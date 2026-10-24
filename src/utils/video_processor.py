@@ -42,6 +42,24 @@ FFMPEG_BIN = _resolve_ffmpeg('ffmpeg')
 FFPROBE_BIN = _resolve_ffmpeg('ffprobe')
 
 
+# Encoders driven through ffmpeg, by the name the UI and callers use. Anything
+# not listed here is treated as an OpenCV FourCC and handed to cv2.VideoWriter.
+FFMPEG_CODECS = {
+    'h264': 'libx264',
+    'h265': 'libx265',
+}
+
+# mp4v (MPEG-4 Part 2) was the only option and is a poor one at high
+# resolutions: no modern rate control, large files, visible blocking. H.264 is
+# the default now and mp4v stays available as a fallback.
+DEFAULT_CODEC = 'h264'
+
+# Constant Rate Factor: lower is better quality and a larger file. 18 is
+# near-transparent for H.264 and suits footage that was just upscaled.
+DEFAULT_CRF = 18
+DEFAULT_PRESET = 'medium'
+
+
 # Containers OpenCV's FFmpeg backend decodes for us. WebM (VP8/VP9) reads
 # natively, so uploads do not need transcoding before processing.
 SUPPORTED_INPUT_EXTENSIONS = (
@@ -375,8 +393,10 @@ class VideoWriter:
         output_path: str,
         fps: float,
         resolution: Tuple[int, int],
-        codec: str = 'mp4v',
-        audio_source: Optional[str] = None
+        codec: str = DEFAULT_CODEC,
+        audio_source: Optional[str] = None,
+        crf: int = DEFAULT_CRF,
+        preset: str = DEFAULT_PRESET,
     ):
         """
         Initialize video writer
@@ -385,13 +405,23 @@ class VideoWriter:
             output_path: Output video path
             fps: Frames per second
             resolution: (width, height)
-            codec: Video codec fourcc
+            codec: 'h264' or 'h265' to encode through ffmpeg, or a FourCC such
+                as 'mp4v' to go through OpenCV. h264 is the default: mp4v is
+                MPEG-4 Part 2, which at 4K produces large files for mediocre
+                quality.
             audio_source: Path to video with audio to copy
+            crf: Constant Rate Factor for the ffmpeg encoders, 0-51. Lower is
+                better quality and a bigger file; 18 is near-transparent, 23 is
+                the x264 default. Ignored for FourCC codecs.
+            preset: x264/x265 speed preset. Ignored for FourCC codecs.
         """
         self.output_path = output_path
         self.fps = fps
         self.resolution = resolution
         self.audio_source = audio_source
+        self.codec = codec
+        self.crf = crf
+        self.preset = preset
 
         # Create temporary file for video without audio
         self.temp_path = None
@@ -401,19 +431,63 @@ class VideoWriter:
         else:
             actual_output = output_path
 
-        # Initialize VideoWriter
-        fourcc = cv2.VideoWriter_fourcc(*codec)
-        self.writer = cv2.VideoWriter(
-            actual_output,
-            fourcc,
-            fps,
-            resolution
-        )
+        self.process = None
+        self.writer = None
 
-        if not self.writer.isOpened():
-            raise ValueError(f"Cannot create video writer for: {output_path}")
+        if codec in FFMPEG_CODECS and FFMPEG_BIN:
+            self._open_ffmpeg(actual_output)
+        else:
+            if codec in FFMPEG_CODECS:
+                logger.warning(
+                    "ffmpeg is not available; falling back to the mp4v "
+                    "encoder, which gives larger files at lower quality."
+                )
+                self.codec = 'mp4v'
+            self._open_opencv(actual_output)
 
         self.frame_count = 0
+
+    def _open_ffmpeg(self, actual_output: str):
+        """Start an ffmpeg process that we feed raw frames to over stdin."""
+        width, height = self.resolution
+
+        # x264 and x265 need even dimensions for yuv420p. A scale filter is
+        # cheaper than refusing an odd size that an arbitrary scale factor can
+        # easily produce.
+        even_w, even_h = width - (width % 2), height - (height % 2)
+
+        cmd = [
+            FFMPEG_BIN,
+            '-hide_banner', '-loglevel', 'error',
+            '-f', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', '%dx%d' % (width, height),
+            '-r', str(self.fps),
+            '-i', '-',
+            '-an',
+            '-c:v', FFMPEG_CODECS[self.codec],
+            '-crf', str(self.crf),
+            '-preset', self.preset,
+            '-pix_fmt', 'yuv420p',
+        ]
+        if (even_w, even_h) != (width, height):
+            cmd += ['-vf', 'scale=%d:%d' % (even_w, even_h)]
+        cmd += ['-y', actual_output]
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def _open_opencv(self, actual_output: str):
+        """Legacy path: let OpenCV mux a FourCC codec."""
+        fourcc = cv2.VideoWriter_fourcc(*self.codec)
+        self.writer = cv2.VideoWriter(actual_output, fourcc, self.fps, self.resolution)
+
+        if not self.writer.isOpened():
+            raise ValueError(f"Cannot create video writer for: {self.output_path}")
 
     def write_frame(self, frame: np.ndarray):
         """
@@ -426,7 +500,24 @@ class VideoWriter:
         if frame.shape[1] != self.resolution[0] or frame.shape[0] != self.resolution[1]:
             frame = cv2.resize(frame, self.resolution)
 
-        self.writer.write(frame)
+        if self.process is not None:
+            if not np.ascontiguousarray(frame).dtype == np.uint8:
+                frame = frame.astype(np.uint8)
+            try:
+                self.process.stdin.write(np.ascontiguousarray(frame).tobytes())
+            except (BrokenPipeError, OSError) as exc:
+                # ffmpeg died; its stderr says why and is worth more than the
+                # write error alone.
+                stderr = b''
+                if self.process.stderr:
+                    stderr = self.process.stderr.read()
+                raise RuntimeError(
+                    "ffmpeg stopped while encoding: %s"
+                    % (stderr.decode(errors='replace').strip() or exc)
+                )
+        else:
+            self.writer.write(frame)
+
         self.frame_count += 1
 
     def write_frames(self, frames: List[np.ndarray]):
@@ -449,6 +540,24 @@ class VideoWriter:
         if self.writer is not None:
             self.writer.release()
             self.writer = None
+
+        if self.process is not None:
+            # Closing stdin tells ffmpeg the stream is over; it then flushes
+            # and writes the container trailer, so it has to finish before the
+            # file can be read or muxed.
+            process, self.process = self.process, None
+            try:
+                if process.stdin:
+                    process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+            _, stderr = process.communicate()
+            if process.returncode not in (0, None):
+                raise RuntimeError(
+                    "ffmpeg failed to encode the video: %s"
+                    % stderr.decode(errors='replace').strip()
+                )
 
         # Copy audio if source provided
         if copy_audio and self.audio_source and self.temp_path:

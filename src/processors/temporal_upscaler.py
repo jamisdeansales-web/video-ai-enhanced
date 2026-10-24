@@ -22,7 +22,12 @@ from typing import Callable, Dict, List, Optional
 import cv2
 
 from utils.system_manager import get_system_manager
-from utils.video_processor import VideoProcessor, VideoWriter
+from utils.video_processor import (
+    DEFAULT_CODEC,
+    DEFAULT_CRF,
+    VideoProcessor,
+    VideoWriter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,8 @@ class TemporalUpscaler:
         device: str = 'auto',
         window: int = 0,
         overlap: int = 0,
+        codec: str = DEFAULT_CODEC,
+        crf: int = DEFAULT_CRF,
     ):
         """
         Args:
@@ -63,6 +70,8 @@ class TemporalUpscaler:
         self.model_name = model_name
         self.scale_factor = float(scale_factor)
         self.requested_overlap = max(0, int(overlap))
+        self.codec = codec
+        self.crf = crf
         self.requested_window = int(window)
         self.sys_manager = get_system_manager()
 
@@ -154,6 +163,8 @@ class TemporalUpscaler:
                 fps=fps,
                 resolution=(out_w, out_h),
                 audio_source=input_path if processor.has_audio() else None,
+                codec=self.codec,
+                crf=self.crf,
             )
 
             buffer: List = []
@@ -296,6 +307,8 @@ def create_temporal_upscaler(
     device: str = 'auto',
     window: int = 0,
     overlap: int = 0,
+    codec: str = DEFAULT_CODEC,
+    crf: int = DEFAULT_CRF,
 ) -> TemporalUpscaler:
     """Factory for the temporal upscaler."""
     return TemporalUpscaler(
@@ -304,4 +317,6 @@ def create_temporal_upscaler(
         device=device,
         window=window,
         overlap=overlap,
+        codec=codec,
+        crf=crf,
     )

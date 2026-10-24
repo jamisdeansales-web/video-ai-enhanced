@@ -10,7 +10,7 @@ from pathlib import Path
 import logging
 
 from models.realesrgan_model import create_realesrgan_model
-from utils.video_processor import VideoProcessor, VideoWriter
+from utils.video_processor import DEFAULT_CODEC, DEFAULT_CRF, VideoProcessor, VideoWriter
 from utils.system_manager import get_system_manager
 
 logger = logging.getLogger(__name__)
@@ -25,22 +25,29 @@ class SpatialUpscaler:
         self,
         model_name: str = 'realesrgan',
         scale_factor: float = 4.0,
-        device: str = 'auto'
+        device: str = 'auto',
+        codec: str = DEFAULT_CODEC,
+        crf: int = DEFAULT_CRF
     ):
         """
         Initialize spatial upscaler
 
         Args:
-            model_name: Model to use ('realesrgan', 'swinir', 'seedvr2')
+            model_name: Model to use ('realesrgan', 'swinir')
             scale_factor: Scaling factor (0.1 to 16.0)
                          - Values >= 1.0: Upscaling
                          - Values < 1.0: Downscaling
                          - 2.0, 4.0: Optimal (pure AI)
                          - Other values: Hybrid (AI + resize)
             device: 'cuda', 'cpu', or 'auto'
+            codec: Output codec: 'h264', 'h265', or a FourCC such as 'mp4v'
+            crf: Quality for the ffmpeg codecs; lower is better, 18 is
+                near-transparent
         """
         self.model_name = model_name
         self.scale_factor = float(scale_factor)
+        self.codec = codec
+        self.crf = crf
 
         # Get system manager
         self.sys_manager = get_system_manager()
@@ -187,7 +194,9 @@ class SpatialUpscaler:
                     output_path,
                     fps=metadata['fps'],
                     resolution=(output_width, output_height),
-                    audio_source=input_path
+                    audio_source=input_path,
+                    codec=self.codec,
+                    crf=self.crf
                 ) as writer:
 
                     # Process frames
@@ -432,7 +441,9 @@ class SpatialUpscaler:
 def create_upscaler(
     model_name: str = 'realesrgan',
     scale_factor: int = 4,
-    device: str = 'auto'
+    device: str = 'auto',
+    codec: str = DEFAULT_CODEC,
+    crf: int = DEFAULT_CRF
 ) -> SpatialUpscaler:
     """
     Factory function to create upscaler
@@ -448,5 +459,7 @@ def create_upscaler(
     return SpatialUpscaler(
         model_name=model_name,
         scale_factor=scale_factor,
-        device=device
+        device=device,
+        codec=codec,
+        crf=crf
     )
