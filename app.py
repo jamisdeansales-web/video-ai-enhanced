@@ -69,8 +69,16 @@ def setup_logging(verbose=False):
 
     handlers = [logging.StreamHandler()]
     try:
-        # Each run starts a fresh log: the interesting one is always the run
-        # that just died.
+        # Keep the previous run alongside the current one. Each run starting
+        # fresh would otherwise destroy a crash log the moment the app is
+        # relaunched - which is the first thing anyone does after a crash.
+        if os.path.exists(path):
+            previous = os.path.join(os.path.dirname(path), 'app.previous.log')
+            try:
+                os.replace(path, previous)
+            except OSError:
+                pass
+
         file_handler = logging.FileHandler(path, mode='w', encoding='utf-8')
         file_handler.setFormatter(
             logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
