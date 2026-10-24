@@ -253,26 +253,51 @@ class VideoProcessor:
         """
         try:
             cmd = [
-                'ffmpeg',
-                '-i', self.video_path,
+                FFMPEG_BIN or 'ffmpeg',
+                # -ss goes before -i so ffmpeg seeks the input. After -i it
+                # decodes and discards instead, and combined with "-c copy"
+                # below it wrote a 261-byte file with no frames at all.
                 '-ss', str(start_time),
                 '-t', str(duration),
-                '-c', 'copy',
+                '-i', self.video_path,
+                # Re-encode rather than stream-copy: a copy can only cut on a
+                # keyframe, so a short segment often came out empty.
+                '-c:v', 'libx264',
+                '-preset', 'veryfast',
+                '-crf', '18',
+                '-c:a', 'aac',
                 '-y',
                 output_path
             ]
 
-            result = subprocess.run(
+            subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True
             )
 
-            return os.path.exists(output_path)
+            # The file existing is not enough; ffmpeg writes a valid container
+            # with zero frames quite happily.
+            if not os.path.exists(output_path):
+                logger.error("Segment extraction produced no file")
+                return False
+
+            probe = cv2.VideoCapture(output_path)
+            frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT)) if probe.isOpened() else 0
+            probe.release()
+
+            if frames < 1:
+                logger.error(
+                    "Segment extraction produced an unreadable or empty file: %s",
+                    output_path,
+                )
+                return False
+
+            return True
 
         except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg error: {e.stderr.decode()}")
+            logger.error(f"FFmpeg error: {e.stderr.decode(errors='replace')}")
             return False
         except FileNotFoundError:
             logger.error("FFmpeg not found. Please install FFmpeg.")

@@ -52,9 +52,12 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
   - Transformer-based, slower than Real-ESRGAN but more detailed
   - Standard and Large variants
 
+- **🎞️ BasicVSR++ Upscaling** ✅
+  - Reads a run of frames instead of one at a time, for temporal coherence
+  - 4× native
+
 ### Coming Soon
 
-- **BasicVSR++**: temporal coherence for flicker-free results
 - **RIFE / DAIN**: frame interpolation
 - **Quality Metrics**: PSNR, SSIM, flickering scores
 - **Batch Processing**: Process multiple videos at once
@@ -244,6 +247,38 @@ venv\Scripts\python.exe scripts\verify_install.py
 | **Real-ESRGAN** | General use, realistic videos | Fast | 4-8 GB | Excellent |
 | **SwinIR** | Photo-realistic, detailed content | Slow | 6-10 GB | Maximum |
 | **SwinIR Large** | Stills and short clips | Slowest | 10-16 GB | Highest |
+| **BasicVSR++** | Footage that flickers between frames | Medium | 8-16 GB | Excellent + Coherence |
+
+**Notes on BasicVSR++.** The other models see one frame at a time, so each
+frame is upscaled independently and small differences between them show up as
+flicker. BasicVSR++ propagates information along the sequence in both
+directions and aligns neighbouring frames with optical flow, which is what
+removes that flicker. It replaces SeedVR2, which was listed here but never
+implemented: there is no pip package for it, it needs a cloned repo, 3B-7B
+weights and a diffusion stack. BasicVSR++ reaches the same goal with 7M
+parameters and a 29 MB checkpoint, and its architecture is already in
+`basicsr`.
+
+It is a **4× model** — there is no 2× checkpoint, so other factors are reached
+by resizing its output.
+
+Because it works on runs of frames, it goes through `TemporalUpscaler` rather
+than `SpatialUpscaler`, which feeds the video in overlapping windows sized from
+the available VRAM. The overlap is not cosmetic: a frame at the edge of a
+window has little propagated context, so too small an overlap leaves a visible
+seam every window. Measured at window=16, the motion-compensated residual at
+the seams against everywhere else was 10.4× at overlap=2 and 0.4× at
+overlap=4, so the default overlap has a floor of 4 frames.
+
+**Honest caveat.** The implementation is verified — weights load strictly, no
+frame falls back, windows reassemble exactly — but the temporal-coherence
+*benefit* was not demonstrated here. On the synthetic clips used for testing,
+Real-ESRGAN is already almost perfectly stable (motion-compensated residual
+0.029) and BasicVSR++ scored higher, not lower. Those clips are test patterns
+with little real motion and no realistic grain, which is the wrong material
+for this: the published checkpoint is trained on real video (REDS). Judge it on
+your own footage, with the kind of noise and compression that actually makes a
+per-frame upscaler flicker.
 
 **Notes on SwinIR.** The architecture comes from the installed `basicsr`, so
 only the weights are downloaded (64 MB for x4, 142 MB for Large).

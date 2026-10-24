@@ -51,6 +51,14 @@ MODEL_URLS = {
         'filename': '003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth',
         'md5': None,
     },
+    # BasicVSR++ for temporal coherence. The architecture is in basicsr, but
+    # these weights are published by mmediting and use its module names;
+    # remap_state_dict in src/models/basicvsrpp_model.py translates them.
+    'basicvsrpp_reds': {
+        'url': 'https://download.openmmlab.com/mmediting/restorers/basicvsr_plusplus/basicvsr_plusplus_c64n7_8x1_600k_reds4_20210217-db622b2f.pth',
+        'filename': 'basicvsr_plusplus_c64n7_8x1_600k_reds4.pth',
+        'md5': None,
+    },
 }
 
 

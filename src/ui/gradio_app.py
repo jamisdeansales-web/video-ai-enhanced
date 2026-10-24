@@ -37,7 +37,12 @@ SPATIAL_MODELS = {
     "Real-ESRGAN (Fast, Excellent Quality)": "realesrgan",
     "SwinIR (Slow, Maximum Quality)": "swinir",
     "SwinIR Large (Slowest, Highest Quality)": "swinir_large",
+    "BasicVSR++ (Temporal Coherence, 4x native)": "basicvsrpp",
 }
+
+# Models that read a run of frames instead of one at a time, and so go through
+# TemporalUpscaler rather than SpatialUpscaler.
+TEMPORAL_MODELS = {"basicvsrpp"}
 
 
 def parse_model_choice(label):
@@ -51,9 +56,25 @@ def parse_model_choice(label):
         return "swinir_large"
     if "SwinIR" in label:
         return "swinir"
+    if "BasicVSR" in label:
+        return "basicvsrpp"
     if "SeedVR2" in label:
         return None
     return "realesrgan"
+
+
+def build_upscaler(model_name, scale, device='auto'):
+    """Create the right upscaler for the chosen model."""
+    if model_name in TEMPORAL_MODELS:
+        from processors.temporal_upscaler import create_temporal_upscaler
+
+        return create_temporal_upscaler(
+            model_name=model_name, scale_factor=scale, device=device
+        )
+
+    return create_upscaler(
+        model_name=model_name, scale_factor=scale, device=device
+    )
 
 
 def get_system_info():
@@ -193,11 +214,7 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
         # Step 1: Upscale
         progress(0.1, desc="Loading upscaling model...")
         try:
-            upscaler = create_upscaler(
-                model_name=model_name,
-                scale_factor=float(scale),
-                device='auto'
-            )
+            upscaler = build_upscaler(model_name, float(scale))
         except ImportError as ie:
             if "Real-ESRGAN not available" in str(ie):
                 error_msg = "❌ Real-ESRGAN not available\n\n"
@@ -424,11 +441,7 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
         # Create upscaler
         progress(0.05, desc="Loading AI model...")
         try:
-            upscaler = create_upscaler(
-                model_name=model_name,
-                scale_factor=float(scale),
-                device='auto'
-            )
+            upscaler = build_upscaler(model_name, float(scale))
         except ImportError as ie:
             if "Real-ESRGAN not available" in str(ie):
                 error_msg = "❌ Real-ESRGAN not available\n\n"
