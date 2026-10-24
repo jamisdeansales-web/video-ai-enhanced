@@ -190,6 +190,15 @@ def parse_args(argv=None):
         help='do not open a browser window when starting the web UI',
     )
     parser.add_argument(
+        '--host',
+        default='127.0.0.1',
+        metavar='ADDRESS',
+        help=(
+            'address to bind the web UI to (default: 127.0.0.1, this machine '
+            'only). Use 0.0.0.0 to expose it on your network'
+        ),
+    )
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='log debug detail, useful when reporting a crash',
@@ -350,13 +359,21 @@ def main():
         print("=" * 50)
         print()
         print("Opening in your browser...")
-        print(f"If it doesn't open automatically, visit: http://localhost:{args.port}")
+        display_host = 'localhost' if args.host in ('127.0.0.1', '0.0.0.0') else args.host
+        print(f"If it doesn't open automatically, visit: http://{display_host}:{args.port}")
+        if args.host == '0.0.0.0':
+            print()
+            print("WARNING: bound to 0.0.0.0 - reachable from your network,")
+            print("         including the folders the app is allowed to serve.")
         print()
         print("Press Ctrl+C to stop the application")
         print()
 
         app.launch(
-            server_name="0.0.0.0",
+            # 127.0.0.1 by default: the UI is a local tool, and the
+            # output folder it is allowed to serve would otherwise be readable
+            # by anything on the same network.
+            server_name=args.host,
             server_port=args.port,
             share=False,
             inbrowser=not args.no_browser,

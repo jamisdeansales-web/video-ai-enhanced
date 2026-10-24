@@ -444,6 +444,12 @@ why and nothing runs.
 The destination is printed in the status box after each run, and the CLI has
 `--output-dir` for `--reverse` and `--export-frames`.
 
+Gradio only serves files from the working directory and the system temp
+folder, so a folder outside those is added to its allowed paths when you pick
+it. That folder is then readable by anything that can reach the app, which is
+why the UI binds to `127.0.0.1` (this machine only). `--host 0.0.0.0` opens it
+to your network; the app warns when you do.
+
 ### 💾 Output codec
 
 Under **Output** in the Processing tab:
