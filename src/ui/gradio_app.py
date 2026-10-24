@@ -71,6 +71,46 @@ def parse_model_choice(label):
     return "realesrgan"
 
 
+# The running Blocks, so handlers can widen what Gradio is allowed to serve.
+_blocks = None
+
+
+def allow_output_path(path):
+    """
+    Let Gradio serve files from `path`.
+
+    Gradio only serves files under the working directory, the system temp
+    directory, or whatever was passed to launch(allowed_paths=...). Returning a
+    file from anywhere else raises InvalidPathError *after* the work is done -
+    the export succeeds, then the gallery refuses to show it.
+
+    The output folder is chosen at run time, long after launch(), but
+    gradio.processing_utils._check_allowed reads blocks.allowed_paths on every
+    call, so appending to it here takes effect immediately.
+    """
+    if not path:
+        return
+
+    blocks = _blocks
+    if blocks is None:
+        try:
+            from gradio.context import LocalContext
+
+            blocks = LocalContext.blocks.get(None)
+        except Exception:  # noqa: BLE001 - internal API, never fail over it
+            blocks = None
+    if blocks is None:
+        return
+
+    absolute = os.path.abspath(path)
+    try:
+        if absolute not in blocks.allowed_paths:
+            blocks.allowed_paths.append(absolute)
+            logger.info("Allowed Gradio to serve files from %s", absolute)
+    except AttributeError:
+        pass
+
+
 def build_upscaler(model_name, scale, device='auto',
                    codec=DEFAULT_CODEC, crf=DEFAULT_CRF):
     """Create the right upscaler for the chosen model."""
@@ -337,6 +377,8 @@ def process_reverse(files, keep_frames, combine_mode, output_folder=None,
     except OSError as exc:
         return f"❌ {exc}", None, None, None, []
 
+    allow_output_path(output_dir)
+
     results = reverse_batch(
         paths,
         combine_mode=combine_mode,
@@ -400,12 +442,14 @@ def process_export_frames(
     # Each run starts from an empty folder so a shorter range cannot leave
     # stills from a previous, longer one behind.
     try:
-        output_dir = os.path.join(
-            resolve_output_dir(output_folder, "video_frame_exports"),
-            Path(video).stem,
-        )
+        output_root = resolve_output_dir(output_folder, "video_frame_exports")
     except OSError as exc:
         return f"❌ {exc}", [], None
+
+    # Allow the root, not the per-video subfolder: the zip is written beside
+    # that subfolder, so allowing only the subfolder leaves the zip unservable.
+    allow_output_path(output_root)
+    output_dir = os.path.join(output_root, Path(video).stem)
     clear_export_dir(output_dir)
 
     try:
@@ -498,6 +542,8 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
         except OSError as exc:
             return None, f"❌ {exc}", [], None, None
 
+        allow_output_path(output_dir)
+
         input_name = Path(video).stem
         output_path = str(output_dir / f"{input_name}_upscaled_{scale}x.mp4")
 
@@ -559,6 +605,7 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
 
 def create_interface():
     """Create the main Gradio interface"""
+    global _blocks
 
     with gr.Blocks(
         theme=gr.themes.Soft(),
@@ -1163,6 +1210,7 @@ def create_interface():
             outputs=[system_info]
         )
 
+    _blocks = app
     return app
 
 
