@@ -509,24 +509,83 @@ def process_export_frames(
     return report, gallery, result["zip_path"]
 
 
+def _upscale_one(video, upscaler, output_dir, scale, measure_quality,
+                 on_progress, progress, label=''):
+    """
+    Upscale a single video with an upscaler that is already built.
+
+    Separated out so a queue can reuse one loaded model across every file;
+    rebuilding it per video would reload the weights each time.
+
+    Returns a dict describing the outcome. OperationCancelled is left to
+    propagate, so a stop ends the whole queue rather than one file.
+    """
+    input_name = Path(video).stem
+    output_path = str(output_dir / f"{input_name}_upscaled_{scale}x.mp4")
+
+    estimate = upscaler.estimate_processing_time(video)
+    estimated = estimate.get('estimated_total_time_formatted', 'Unknown')
+    progress(0.05, desc=f"{label}Processing {input_name} (est. {estimated})...")
+
+    result = upscaler.upscale_video(video, output_path, progress_callback=on_progress)
+
+    if not result['success']:
+        return {
+            'success': False,
+            'input': video,
+            'name': input_name,
+            'error': result.get('error', 'Unknown error'),
+        }
+
+    quality_rows = []
+    if measure_quality:
+        progress(0.97, desc=f"{label}Measuring quality...")
+        try:
+            quality_rows = format_metric_rows(compare_videos(video, output_path))
+        except Exception as exc:  # noqa: BLE001 - never lose a video over a metric
+            logger.error("Quality metrics failed: %s", exc, exc_info=True)
+            quality_rows = [["Quality metrics", f"failed: {exc}"]]
+
+    return {
+        'success': True,
+        'input': video,
+        'name': input_name,
+        'output_path': output_path,
+        'metrics': result['metrics'],
+        'quality_rows': quality_rows,
+    }
+
+
 def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal,
                        codec=DEFAULT_CODEC, crf=DEFAULT_CRF, measure_quality=False,
-                       output_folder=None, progress=gr.Progress()):
-    """Process full video"""
+                       output_folder=None, queue_files=None, progress=gr.Progress()):
+    """
+    Upscale one video, or every video in the queue.
+
+    When the queue holds files they are processed in order and the single
+    video input is ignored, since adding files to the queue is the more
+    explicit choice. The player and the Comparison tab show the last file
+    that succeeded.
+    """
     global current_upscaler
 
-    if video is None:
-        return None, "⚠️ Please upload a video first", []
+    # gr.File hands back either paths or objects carrying one.
+    targets = [getattr(f, 'name', f) for f in (queue_files or [])]
+    if not targets:
+        targets = [video] if video else []
+
+    if not targets:
+        return None, "Please upload a video first", [], None, None
 
     try:
         progress(0, desc="Initializing...")
 
-        # Parse model name
         model_name = parse_model_choice(model)
         if model_name is None:
-            return None, f"❌ {model.split('(')[0].strip()} is not implemented yet", []
+            return (None, f"{model.split('(')[0].strip()} is not implemented yet",
+                    [], None, None)
 
-        # Create upscaler
+        # Built once and reused for every file in the queue.
         progress(0.05, desc="Loading AI model...")
         try:
             upscaler = build_upscaler(
@@ -534,65 +593,75 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
             )
         except ImportError as ie:
             if "Real-ESRGAN not available" in str(ie):
-                error_msg = "❌ Real-ESRGAN not available\n\n"
-                error_msg += "📦 **Installation Required:**\n\n"
-                error_msg += "**Option 1 (Recommended):** Use Python 3.10-3.12\n"
-                error_msg += "  • Download: https://www.python.org/downloads/\n"
-                error_msg += "  • Run: install.bat\n\n"
-                error_msg += "**Option 2:** Manual install for Python 3.13\n"
-                error_msg += "  • See: PYTHON_313_WORKAROUND.md\n"
-                error_msg += "  • Or run: pip install realesrgan basicsr\n\n"
-                error_msg += "💡 **Alternative:** RIFE interpolation works without Real-ESRGAN\n"
-                error_msg += "  • Enable 'FPS Interpolation' and try without upscaling"
-                return None, error_msg, []
+                error_msg = "Real-ESRGAN not available\n\n"
+                error_msg += "Installation required:\n\n"
+                error_msg += "Option 1 (recommended): use Python 3.10-3.12\n"
+                error_msg += "  - Download: https://www.python.org/downloads/\n"
+                error_msg += "  - Run: install.bat\n\n"
+                error_msg += "Option 2: install by hand\n"
+                error_msg += "  - See: PYTHON_313_WORKAROUND.md\n"
+                error_msg += "  - Or run: pip install realesrgan basicsr\n"
+                return None, error_msg, [], None, None
             raise
 
-        # Get estimate
-        estimate = upscaler.estimate_processing_time(video)
-        estimated_time = estimate.get('estimated_total_time_formatted', 'Unknown')
+        current_upscaler = upscaler
 
-        logger.info(f"Estimated processing time: {estimated_time}")
-
-        # Create output path
         try:
             output_dir = Path(
                 resolve_output_dir(output_folder, "video_upscaler_outputs")
             )
         except OSError as exc:
-            return None, f"❌ {exc}", [], None, None
+            return None, f"{exc}", [], None, None
 
         allow_output_path(output_dir)
         reset_stop()
 
-        input_name = Path(video).stem
-        output_path = str(output_dir / f"{input_name}_upscaled_{scale}x.mp4")
+        total_files = len(targets)
+        results = []
 
-        # Progress callback
-        def update_progress(current, total, eta):
-            pct = current / total if total > 0 else 0
-            progress(0.05 + 0.95 * pct, desc=f"Processing {current}/{total} frames (ETA: {int(eta)}s)")
+        for index, target in enumerate(targets, start=1):
+            label = f"[{index}/{total_files}] " if total_files > 1 else ""
 
-        # Process video
-        progress(0.05, desc=f"Processing full video (est. {estimated_time})...")
-        result = upscaler.upscale_video(
-            video,
-            output_path,
-            progress_callback=update_progress
-        )
+            def on_progress(current, total, eta, _index=index, _label=label):
+                # Each file gets its own slice of the bar, so a queue advances
+                # steadily instead of restarting from zero on every file.
+                within = current / total if total > 0 else 0
+                overall = ((_index - 1) + within) / total_files
+                progress(
+                    0.05 + 0.92 * overall,
+                    desc=f"{_label}Frame {current}/{total} (ETA: {int(eta)}s)",
+                )
 
-        if result['success']:
-            metrics = result['metrics']
+            try:
+                outcome = _upscale_one(
+                    target, upscaler, output_dir, scale, measure_quality,
+                    on_progress, progress, label,
+                )
+            except OperationCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one bad file must not end the queue
+                logger.error("Failed to upscale %s: %s", target, exc, exc_info=True)
+                outcome = {
+                    'success': False, 'input': target,
+                    'name': Path(target).stem, 'error': str(exc),
+                }
 
-            status = f"✅ Video upscaling completed!\n\n"
-            status += f"💾 Output saved to:\n{output_path}\n\n"
-            status += f"📊 Statistics:\n"
-            status += f"⏱️ Total time: {metrics['total_time']:.1f}s ({metrics['total_time']/60:.1f} min)\n"
-            status += f"🎬 Frames: {metrics['frames_processed']:,}\n"
-            status += f"📐 Resolution: {metrics['input_resolution']} → {metrics['output_resolution']}\n"
-            status += f"⚡ Speed: {metrics['avg_time_per_frame']:.3f}s per frame\n"
-            status += f"📁 Saved to: {output_dir}"
+            results.append(outcome)
 
-            # Metrics table
+        succeeded = [r for r in results if r['success']]
+        failed = [r for r in results if not r['success']]
+
+        if total_files == 1 and succeeded:
+            metrics = succeeded[0]['metrics']
+            status = "Video upscaling completed\n\n"
+            status += f"Output saved to:\n{succeeded[0]['output_path']}\n\n"
+            status += "Statistics:\n"
+            status += f"Total time: {metrics['total_time']:.1f}s ({metrics['total_time']/60:.1f} min)\n"
+            status += f"Frames: {metrics['frames_processed']:,}\n"
+            status += f"Resolution: {metrics['input_resolution']} -> {metrics['output_resolution']}\n"
+            status += f"Speed: {metrics['avg_time_per_frame']:.3f}s per frame\n"
+            status += f"Saved to: {output_dir}"
+
             metrics_data = [
                 ["Processing Time", f"{metrics['total_time']:.1f}s"],
                 ["Frames Processed", f"{metrics['frames_processed']:,}"],
@@ -601,29 +670,57 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
                 ["Scale Factor", f"{metrics['scale_factor']}x"],
                 ["Avg Time/Frame", f"{metrics['avg_time_per_frame']:.3f}s"],
             ]
-
-            # Quality metrics are sampled, but optical flow over a long clip
-            # still costs real time, so they are opt-in.
-            if measure_quality:
-                progress(0.97, desc="Measuring quality...")
-                try:
-                    quality = compare_videos(video, output_path)
-                    metrics_data.extend(format_metric_rows(quality))
-                except Exception as exc:  # noqa: BLE001 - never lose the video
-                    logger.error("Quality metrics failed: %s", exc, exc_info=True)
-                    metrics_data.append(["Quality metrics", f"failed: {exc}"])
-
-            return output_path, status, metrics_data, video, output_path
+            metrics_data.extend(succeeded[0]['quality_rows'])
         else:
-            error_msg = f"❌ Processing failed: {result.get('error', 'Unknown error')}"
-            return None, error_msg, [], None, None
+            lines = []
+            total_time = 0.0
+            for item in results:
+                if item['success']:
+                    m = item['metrics']
+                    total_time += m['total_time']
+                    lines.append(
+                        f"OK      {item['name']}: {m['frames_processed']:,} frames "
+                        f"in {m['total_time']:.1f}s"
+                    )
+                else:
+                    lines.append(f"FAILED  {item['name']}: {item['error']}")
+
+            status = f"{len(succeeded)}/{total_files} videos upscaled"
+            if failed:
+                status += f", {len(failed)} failed"
+            status += f"\nTotal time: {total_time:.1f}s ({total_time/60:.1f} min)"
+            status += f"\nSaved to: {output_dir}\n\n" + "\n".join(lines)
+
+            metrics_data = []
+            for item in results:
+                if item['success']:
+                    m = item['metrics']
+                    metrics_data.append([
+                        item['name'],
+                        f"{m['frames_processed']:,} frames, {m['total_time']:.1f}s, "
+                        f"{m['input_resolution']} -> {m['output_resolution']}",
+                    ])
+                else:
+                    metrics_data.append([item['name'], f"failed: {item['error']}"])
+            for item in succeeded:
+                metrics_data.extend(
+                    [[f"{item['name']} - {row[0]}", row[1]]
+                     for row in item['quality_rows']]
+                )
+
+        if not succeeded:
+            return None, status, metrics_data, None, None
+
+        last = succeeded[-1]
+        return (last['output_path'], status, metrics_data,
+                last['input'], last['output_path'])
 
     except OperationCancelled:
         logger.info("Processing stopped by the user")
-        return None, "⏹️ Stopped. The partial output was discarded.", [], None, None
+        return None, "Stopped. The partial output was discarded.", [], None, None
     except Exception as e:
         logger.error(f"Error in full processing: {e}", exc_info=True)
-        return None, f"❌ Error: {str(e)}", [], None, None
+        return None, f"Error: {str(e)}", [], None, None
 
 
 def create_interface():
@@ -662,6 +759,18 @@ def create_interface():
                         video_input = gr.Video(
                             label="📹 Video Source (mp4, webm, mkv, mov, avi)",
                             include_audio=True
+                        )
+
+                        process_queue_files = gr.File(
+                            label="📚 Batch queue (optional)",
+                            file_count="multiple",
+                            file_types=["video"],
+                        )
+                        gr.Markdown(
+                            "*Add files here to upscale several videos in one "
+                            "run. When the queue is not empty the single video "
+                            "above is ignored, and the model is loaded once for "
+                            "the whole batch.*"
                         )
 
                         # Video info
@@ -1224,7 +1333,8 @@ def create_interface():
                 output_codec,
                 output_crf,
                 measure_quality,
-                process_output_folder
+                process_output_folder,
+                process_queue_files
             ],
             outputs=[
                 video_output,

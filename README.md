@@ -14,6 +14,7 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 
 - **Reverse videos** frame by frame, in batch, from the UI or the CLI
 - **Export frames** as PNG/JPEG over any time range, optionally upscaled
+- **Batch queue** in the Processing tab, with one model load for the whole run
 
 ### Currently Working (v0.2.0)
 
@@ -449,6 +450,20 @@ folder, so a folder outside those is added to its allowed paths when you pick
 it. That folder is then readable by anything that can reach the app, which is
 why the UI binds to `127.0.0.1` (this machine only). `--host 0.0.0.0` opens it
 to your network; the app warns when you do.
+
+### 📚 Batch queue
+
+The Processing tab takes a **Batch queue**: drop several videos in and they are
+upscaled one after another. When the queue is not empty the single video input
+above it is ignored, since filling the queue is the more explicit choice.
+
+The model is loaded **once** for the whole batch rather than per file, which is
+most of the saving on a long queue.
+
+One bad file does not end the run: it is reported on its own line and the queue
+carries on. The status box summarises every file, the Comparison tab and the
+player show the last one that succeeded, and **Stop** ends the whole queue, not
+just the file in flight.
 
 ### ⏹️ Stopping a job
 
