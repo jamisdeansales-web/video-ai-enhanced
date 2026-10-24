@@ -433,6 +433,7 @@ class VideoWriter:
 
         self.process = None
         self.writer = None
+        self._stderr_file = None
 
         if codec in FFMPEG_CODECS and FFMPEG_BIN:
             self._open_ffmpeg(actual_output)
@@ -474,12 +475,35 @@ class VideoWriter:
             cmd += ['-vf', 'scale=%d:%d' % (even_w, even_h)]
         cmd += ['-y', actual_output]
 
+        # ffmpeg's stderr goes to a file, not a pipe. A pipe nobody reads fills
+        # its OS buffer (~64 KB) and then blocks ffmpeg forever, which blocks
+        # our next frame write: a long encode would hang with no error at all.
+        self._stderr_file = tempfile.TemporaryFile()
+
         self.process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=self._stderr_file,
         )
+
+    def _read_stderr(self) -> str:
+        """Read back whatever ffmpeg reported, without consuming the handle."""
+        if self._stderr_file is None:
+            return ''
+        try:
+            self._stderr_file.seek(0)
+            return self._stderr_file.read().decode(errors='replace').strip()
+        except (OSError, ValueError):
+            return ''
+
+    def _close_stderr(self):
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except OSError:
+                pass
+            self._stderr_file = None
 
     def _open_opencv(self, actual_output: str):
         """Legacy path: let OpenCV mux a FourCC codec."""
@@ -506,14 +530,11 @@ class VideoWriter:
             try:
                 self.process.stdin.write(np.ascontiguousarray(frame).tobytes())
             except (BrokenPipeError, OSError) as exc:
-                # ffmpeg died; its stderr says why and is worth more than the
-                # write error alone.
-                stderr = b''
-                if self.process.stderr:
-                    stderr = self.process.stderr.read()
+                # ffmpeg died; its own message says why and is worth more than
+                # the write error alone.
                 raise RuntimeError(
                     "ffmpeg stopped while encoding: %s"
-                    % (stderr.decode(errors='replace').strip() or exc)
+                    % (self._read_stderr() or exc)
                 )
         else:
             self.writer.write(frame)
@@ -552,12 +573,12 @@ class VideoWriter:
             except (BrokenPipeError, OSError):
                 pass
 
-            _, stderr = process.communicate()
+            process.wait()
             if process.returncode not in (0, None):
                 raise RuntimeError(
-                    "ffmpeg failed to encode the video: %s"
-                    % stderr.decode(errors='replace').strip()
+                    "ffmpeg failed to encode the video: %s" % self._read_stderr()
                 )
+            self._close_stderr()
 
         # Copy audio if source provided
         if copy_audio and self.audio_source and self.temp_path:
@@ -620,7 +641,16 @@ class VideoWriter:
 
     def __del__(self):
         """Destructor"""
-        self.close(copy_audio=False)
+        # close() now raises when ffmpeg failed, which a destructor must not
+        # do: Python can only print "Exception ignored in __del__" over the
+        # real error the caller is already handling. Releasing the handles is
+        # all that matters here.
+        try:
+            self.close(copy_audio=False)
+        except Exception:  # noqa: BLE001 - nothing can act on it at this point
+            pass
+        finally:
+            self._close_stderr()
 
 
 def get_video_info(video_path: str) -> Dict:

@@ -60,6 +60,17 @@ if not "!EXIT_CODE!"=="0" (
     echo.
     echo ERROR: the application exited with code !EXIT_CODE!
     echo.
+    REM A negative or very large code means the process was killed
+    REM rather than raising a Python error, so nothing was printed
+    REM about why. The log holds the run context up to that point.
+    echo The run log is at:
+    echo   %LOCALAPPDATA%\video-upscaler-pro\logs\app.log
+    echo.
+    echo If the app died without a Python error ^(a negative exit code^),
+    echo that log and the last lines above are what identify the cause.
+    echo Re-running with --verbose adds detail:
+    echo   venv\Scripts\python.exe app.py --verbose
+    echo.
     pause
 )
 

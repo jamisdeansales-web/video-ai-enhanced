@@ -31,6 +31,63 @@ def check_dependencies():
         return False
 
 
+def unbuffer_output():
+    """
+    Flush stdout and stderr line by line.
+
+    Python block-buffers stdout when it is not a terminal, so when the process
+    dies hard - a native crash, or the OS killing it - the last few KB are
+    still in the buffer and never reach the console or a redirect. That is the
+    output which would have said what was happening at the time.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
+
+def get_log_path():
+    """Where the run log goes."""
+    base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+    return os.path.join(base, 'video-upscaler-pro', 'logs', 'app.log')
+
+
+def setup_logging(verbose=False):
+    """
+    Log to a file as well as the console.
+
+    A crash inside CUDA or a native library kills the process without a Python
+    traceback, so the console shows the last thing printed and nothing about
+    why. The file keeps the run's context - model, resolution, VRAM estimate,
+    frame number - which is what makes such a crash diagnosable afterwards.
+    """
+    import logging
+
+    path = get_log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    handlers = [logging.StreamHandler()]
+    try:
+        # Each run starts a fresh log: the interesting one is always the run
+        # that just died.
+        file_handler = logging.FileHandler(path, mode='w', encoding='utf-8')
+        file_handler.setFormatter(
+            logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        )
+        handlers.append(file_handler)
+    except OSError as exc:
+        print(f"WARNING: could not open the log file {path}: {exc}")
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=handlers,
+        force=True,
+    )
+    return path
+
+
 def parse_args(argv=None):
     """Parse the command line."""
     parser = argparse.ArgumentParser(
@@ -124,6 +181,11 @@ def parse_args(argv=None):
         action='store_true',
         help='do not open a browser window when starting the web UI',
     )
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='log debug detail, useful when reporting a crash',
+    )
     return parser.parse_args(argv)
 
 
@@ -135,8 +197,7 @@ def run_reverse_cli(args):
             print(f"ERROR: no such file: {path}")
         return 1
 
-    import logging
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    setup_logging(args.verbose)
 
     from processors.video_reverser import reverse_batch
 
@@ -178,8 +239,7 @@ def run_export_frames_cli(args):
             print(f"ERROR: no such file: {path}")
         return 1
 
-    import logging
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    setup_logging(args.verbose)
 
     from processors.frame_exporter import export_frames
 
@@ -237,6 +297,7 @@ def run_export_frames_cli(args):
 
 def main():
     """Main application entry point"""
+    unbuffer_output()
     args = parse_args()
 
     if args.reverse and args.export_frames:
@@ -253,9 +314,13 @@ def main():
     if args.reverse:
         sys.exit(run_reverse_cli(args))
 
+    log_path = setup_logging(args.verbose)
+
     print("=" * 50)
     print("Video Upscaler Pro - Starting...")
     print("=" * 50)
+    print()
+    print(f"Log file: {log_path}")
     print()
 
     # Import UI module
