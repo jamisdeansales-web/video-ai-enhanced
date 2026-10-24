@@ -16,6 +16,7 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 - **Export frames** as PNG/JPEG over any time range, optionally upscaled
 - **Batch queue** in the Processing tab, with one model load for the whole run
 - **RIFE frame interpolation**, the real network rather than an optical-flow stand-in
+- **Resume** an interrupted upscale instead of starting over
 
 ### Currently Working (v0.2.0)
 
@@ -65,7 +66,7 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 
 ### Coming Soon
 
-- **Resume**: pick a long job back up after an interruption
+Nothing currently planned.
 - **Batch Processing**: Process multiple videos at once
 
 ## 📋 Requirements
@@ -496,6 +497,34 @@ One bad file does not end the run: it is reported on its own line and the queue
 carries on. The status box summarises every file, the Comparison tab and the
 player show the last one that succeeded, and **Stop** ends the whole queue, not
 just the file in flight.
+
+### ♻️ Resuming an interrupted upscale
+
+A long upscale that is stopped, crashes, or loses power used to start again
+from frame zero. With **Resume an interrupted run** ticked (the default), the
+output is written in segments of 200 frames and joined at the end; a rerun
+with the same inputs keeps the finished segments and carries on from the first
+frame that is missing.
+
+Segments rather than a cache of individual frames: at 4K a PNG is 8-25 MB, so
+caching a ten-minute clip frame by frame would need hundreds of gigabytes. The
+segments are encoded with the same codec as the final file, so they cost about
+what the output costs, and joining them copies the streams rather than
+re-encoding.
+
+A job is identified by what would change its result — the input file with its
+size and mtime, the scale, the model, the codec and the quality. Change any of
+them and it is a new job with its own segments, so edited inputs or different
+settings never resume onto mismatched work. A segment that was being written
+when the process died is discarded rather than trusted.
+
+Partial work lives in `.v2up_resume/` beside the output and is removed once
+the final file exists. Resume needs ffmpeg to join the segments; without it
+the app says so and writes in one pass as before.
+
+Measured on a 125-frame clip with audio: interrupted at 3.3s, rerun finished
+in 13.8s against 19.0s from scratch, resuming at frame 20, producing the same
+125 frames with the audio intact.
 
 ### ⏹️ Stopping a job
 

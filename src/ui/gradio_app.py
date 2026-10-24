@@ -517,7 +517,7 @@ def process_export_frames(
 
 
 def _upscale_one(video, upscaler, output_dir, scale, measure_quality,
-                 on_progress, progress, label=''):
+                 on_progress, progress, label='', enable_resume=True):
     """
     Upscale a single video with an upscaler that is already built.
 
@@ -534,7 +534,9 @@ def _upscale_one(video, upscaler, output_dir, scale, measure_quality,
     estimated = estimate.get('estimated_total_time_formatted', 'Unknown')
     progress(0.05, desc=f"{label}Processing {input_name} (est. {estimated})...")
 
-    result = upscaler.upscale_video(video, output_path, progress_callback=on_progress)
+    result = upscaler.upscale_video(
+        video, output_path, progress_callback=on_progress, resume=enable_resume
+    )
 
     if not result['success']:
         return {
@@ -565,7 +567,8 @@ def _upscale_one(video, upscaler, output_dir, scale, measure_quality,
 
 def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal,
                        codec=DEFAULT_CODEC, crf=DEFAULT_CRF, measure_quality=False,
-                       output_folder=None, queue_files=None, progress=gr.Progress()):
+                       output_folder=None, queue_files=None, enable_resume=True,
+                       progress=gr.Progress()):
     """
     Upscale one video, or every video in the queue.
 
@@ -642,7 +645,7 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
             try:
                 outcome = _upscale_one(
                     target, upscaler, output_dir, scale, measure_quality,
-                    on_progress, progress, label,
+                    on_progress, progress, label, enable_resume,
                 )
             except OperationCancelled:
                 raise
@@ -845,6 +848,11 @@ def create_interface():
                                 step=1,
                                 value=DEFAULT_CRF,
                                 info="Lower = better and bigger. 18 is near-transparent, 23 the usual default.",
+                            )
+                            enable_resume = gr.Checkbox(
+                                label="♻️ Resume an interrupted run",
+                                value=True,
+                                info="Encodes in segments so a stopped or crashed job restarts where it left off",
                             )
                             measure_quality = gr.Checkbox(
                                 label="📊 Measure quality after processing (PSNR / SSIM / stability)",
@@ -1345,7 +1353,8 @@ def create_interface():
                 output_crf,
                 measure_quality,
                 process_output_folder,
-                process_queue_files
+                process_queue_files,
+                enable_resume
             ],
             outputs=[
                 video_output,
