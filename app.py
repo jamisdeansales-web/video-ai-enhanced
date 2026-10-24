@@ -72,14 +72,24 @@ def setup_logging(verbose=False):
         # Keep the previous run alongside the current one. Each run starting
         # fresh would otherwise destroy a crash log the moment the app is
         # relaunched - which is the first thing anyone does after a crash.
-        if os.path.exists(path):
-            previous = os.path.join(os.path.dirname(path), 'app.previous.log')
-            try:
-                os.replace(path, previous)
-            except OSError:
-                pass
+        #
+        # Only the first process in the tree may rotate. Gradio spawns a child
+        # on Windows, and a child rotating again renamed the file out from
+        # under the parent's still-open handle: the parent kept writing to
+        # what was now app.previous.log while app.log sat empty. The marker is
+        # an environment variable because a spawned child inherits it.
+        if not os.environ.get('V2UP_LOG_INITIALISED'):
+            if os.path.exists(path):
+                previous = os.path.join(os.path.dirname(path), 'app.previous.log')
+                try:
+                    os.replace(path, previous)
+                except OSError:
+                    pass
+            os.environ['V2UP_LOG_INITIALISED'] = '1'
 
-        file_handler = logging.FileHandler(path, mode='w', encoding='utf-8')
+        # Append, so a second process in the tree adds to the log instead of
+        # truncating what the first one wrote.
+        file_handler = logging.FileHandler(path, mode='a', encoding='utf-8')
         file_handler.setFormatter(
             logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         )

@@ -450,6 +450,22 @@ it. That folder is then readable by anything that can reach the app, which is
 why the UI binds to `127.0.0.1` (this machine only). `--host 0.0.0.0` opens it
 to your network; the app warns when you do.
 
+### ⏹️ Stopping a job
+
+Each of the Processing, Export Frames and Reverse tabs has a **Stop** button.
+
+Gradio can drop the event it is waiting on, but it cannot kill the thread
+already doing the work, so stopping is cooperative: the loops check a flag
+between frames and raise. The button does both — drops the event so the
+spinner stops, and sets the flag so the GPU actually stops.
+
+It takes effect at the next frame boundary, so the delay is one frame: a
+fraction of a second at SD, a few seconds for a 4K frame with many tiles.
+
+What already exists is kept. A stopped frame export leaves the stills it had
+written and tells you how many; a stopped upscale discards the partial video,
+since half a file is of no use.
+
 ### 💾 Output codec
 
 Under **Output** in the Processing tab:

@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 
+from utils.cancellation import check as check_cancelled
 from utils.image_io import check_writable, imread, imwrite
 from utils.video_processor import VideoProcessor
 
@@ -195,6 +196,7 @@ def export_frames(
         for index, frame in processor.extract_frames(
             start_frame=start_frame, end_frame=end_frame, step=every_n
         ):
+            check_cancelled()
             if upscaler is not None:
                 # _upscale_frame is the only entry point for a single frame;
                 # upscale_video works on whole files.

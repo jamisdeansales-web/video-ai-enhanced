@@ -10,6 +10,7 @@ from pathlib import Path
 import logging
 
 from models.realesrgan_model import create_realesrgan_model
+from utils.cancellation import OperationCancelled, check as check_cancelled
 from utils.video_processor import DEFAULT_CODEC, DEFAULT_CRF, VideoProcessor, VideoWriter
 from utils.system_manager import get_system_manager
 
@@ -204,6 +205,8 @@ class SpatialUpscaler:
                     frame_times = []
 
                     for frame_idx, frame in vp.extract_frames(start_frame, end_frame):
+                        # Between frames: responsive without costing throughput.
+                        check_cancelled()
                         frame_start = time.time()
 
                         # Upscale frame
@@ -255,6 +258,11 @@ class SpatialUpscaler:
                 }
             }
 
+        except OperationCancelled:
+            # A stop is not a failure; let it reach the caller so the UI can
+            # say "stopped" rather than report an error.
+            logger.info("Video upscaling stopped at the user's request")
+            raise
         except Exception as e:
             logger.error(f"Error during video upscaling: {e}", exc_info=True)
             return {
@@ -368,6 +376,9 @@ class SpatialUpscaler:
                 progress_callback=progress_callback
             )
 
+        except OperationCancelled:
+            logger.info("Preview stopped at the user's request")
+            raise
         except Exception as e:
             logger.error(f"Error creating preview: {e}")
             return {

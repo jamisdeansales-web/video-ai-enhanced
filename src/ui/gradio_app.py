@@ -30,13 +30,13 @@ from processors.spatial_upscaler import create_upscaler
 from processors.temporal_interpolator import create_interpolator
 from processors.video_reverser import COMBINE_MODES, reverse_batch
 from processors.frame_exporter import IMAGE_FORMATS, clear_export_dir, export_frames
+from utils.cancellation import OperationCancelled, request_stop, reset as reset_stop
 from utils.image_io import resolve_output_dir
 from utils.quality_metrics import compare_videos, format_metric_rows
 
 # Global state
 current_upscaler = None
 current_interpolator = None
-processing_cancelled = False
 
 # Dropdown label -> the name SpatialUpscaler expects. A value of None marks a
 # model that is listed but not implemented, so the UI can say so instead of
@@ -348,6 +348,9 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
 
             return output_path, status
 
+    except OperationCancelled:
+        logger.info("Preview stopped by the user")
+        return None, "⏹️ Stopped."
     except Exception as e:
         logger.error(f"Error in preview: {e}", exc_info=True)
         return None, f"❌ Error: {str(e)}"
@@ -378,14 +381,19 @@ def process_reverse(files, keep_frames, combine_mode, output_folder=None,
         return f"❌ {exc}", None, None, None, []
 
     allow_output_path(output_dir)
+    reset_stop()
 
-    results = reverse_batch(
-        paths,
-        combine_mode=combine_mode,
-        keep_frames=keep_frames,
-        output_dir=output_dir,
-        progress_callback=on_progress,
-    )
+    try:
+        results = reverse_batch(
+            paths,
+            combine_mode=combine_mode,
+            keep_frames=keep_frames,
+            output_dir=output_dir,
+            progress_callback=on_progress,
+        )
+    except OperationCancelled:
+        logger.info("Reverse stopped by the user")
+        return "⏹️ Stopped.", None, None, None, []
 
     succeeded = [r for r in results if r.get("success")]
     failed = [r for r in results if not r.get("success")]
@@ -451,6 +459,7 @@ def process_export_frames(
     allow_output_path(output_root)
     output_dir = os.path.join(output_root, Path(video).stem)
     clear_export_dir(output_dir)
+    reset_stop()
 
     try:
         result = export_frames(
@@ -466,6 +475,16 @@ def process_export_frames(
             scale_factor=float(scale),
             make_zip=bool(make_zip),
             progress_callback=on_progress,
+        )
+    except OperationCancelled:
+        # The frames written before the stop are real and stay on disk.
+        written = len([
+            n for n in os.listdir(output_dir)
+        ]) if os.path.isdir(output_dir) else 0
+        logger.info("Frame export stopped after %d frames", written)
+        return (
+            f"⏹️ Stopped. {written} frames were written to {output_dir}",
+            [], None,
         )
     except Exception as exc:  # noqa: BLE001 - report it in the UI
         logger.error(f"Frame export failed: {exc}", exc_info=True)
@@ -543,6 +562,7 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
             return None, f"❌ {exc}", [], None, None
 
         allow_output_path(output_dir)
+        reset_stop()
 
         input_name = Path(video).stem
         output_path = str(output_dir / f"{input_name}_upscaled_{scale}x.mp4")
@@ -598,6 +618,9 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
             error_msg = f"❌ Processing failed: {result.get('error', 'Unknown error')}"
             return None, error_msg, [], None, None
 
+    except OperationCancelled:
+        logger.info("Processing stopped by the user")
+        return None, "⏹️ Stopped. The partial output was discarded.", [], None, None
     except Exception as e:
         logger.error(f"Error in full processing: {e}", exc_info=True)
         return None, f"❌ Error: {str(e)}", [], None, None
@@ -788,6 +811,11 @@ def create_interface():
                         variant="primary",
                         size="lg"
                     )
+                    process_stop_btn = gr.Button(
+                        "⏹️ Stop",
+                        variant="stop",
+                        size="lg"
+                    )
 
                 # Status
                 status_text = gr.Textbox(
@@ -858,6 +886,7 @@ def create_interface():
                         with gr.Row():
                             reverse_clear_btn = gr.Button("Clear")
                             reverse_btn = gr.Button("🔁 Reverse", variant="primary")
+                            reverse_stop_btn = gr.Button("⏹️ Stop", variant="stop")
                         reverse_original = gr.Video(label="📼 Original", interactive=False)
 
                     with gr.Column(scale=1):
@@ -968,7 +997,9 @@ def create_interface():
                                 info="<1.0 = Downscale, 2.0/4.0 = Optimal AI, Other = Hybrid (AI+Resize)",
                             )
 
-                        export_btn = gr.Button("🖼️ Export Frames", variant="primary")
+                        with gr.Row():
+                            export_btn = gr.Button("🖼️ Export Frames", variant="primary")
+                            export_stop_btn = gr.Button("⏹️ Stop", variant="stop")
 
                     with gr.Column(scale=1):
                         export_status = gr.Textbox(
@@ -1087,7 +1118,7 @@ def create_interface():
             outputs=[export_scale],
         )
 
-        export_btn.click(
+        export_event = export_btn.click(
             fn=process_export_frames,
             inputs=[
                 export_input,
@@ -1106,7 +1137,7 @@ def create_interface():
         )
 
         # Reverse tab
-        reverse_btn.click(
+        reverse_event = reverse_btn.click(
             fn=process_reverse,
             inputs=[
                 reverse_input,
@@ -1166,7 +1197,7 @@ def create_interface():
         )
 
         # Preview button
-        preview_btn.click(
+        preview_event = preview_btn.click(
             fn=process_preview,
             inputs=[
                 video_input,
@@ -1180,7 +1211,7 @@ def create_interface():
         )
 
         # Process button
-        process_btn.click(
+        process_event = process_btn.click(
             fn=process_full_video,
             inputs=[
                 video_input,
@@ -1202,6 +1233,31 @@ def create_interface():
                 original_video,
                 processed_video
             ]
+        )
+
+        # Stop buttons.
+        #
+        # queue=False matters: with the default queue the click would wait
+        # behind the job it is meant to interrupt, so the button would do
+        # nothing until the work had already finished.
+        #
+        # cancels= drops the Gradio event so the spinner stops, but it cannot
+        # kill the thread doing the work - that is what request_stop is for.
+        # Both are needed: one stops the UI waiting, the other stops the GPU.
+        process_stop_btn.click(
+            fn=request_stop,
+            cancels=[process_event, preview_event],
+            queue=False,
+        )
+        export_stop_btn.click(
+            fn=request_stop,
+            cancels=[export_event],
+            queue=False,
+        )
+        reverse_stop_btn.click(
+            fn=request_stop,
+            cancels=[reverse_event],
+            queue=False,
         )
 
         # Refresh system info

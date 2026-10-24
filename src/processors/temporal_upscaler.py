@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional
 
 import cv2
 
+from utils.cancellation import check as check_cancelled
 from utils.system_manager import get_system_manager
 from utils.video_processor import (
     DEFAULT_CODEC,
@@ -204,6 +205,7 @@ class TemporalUpscaler:
 
             try:
                 for index, frame in processor.extract_frames():
+                    check_cancelled()
                     buffer.append(frame)
 
                     if len(buffer) == window:

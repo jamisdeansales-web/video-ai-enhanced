@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Optional
 
 import cv2
 
+from utils.cancellation import OperationCancelled, check as check_cancelled
 from utils.image_io import imread, imwrite
 from utils.video_processor import VideoProcessor, VideoWriter
 
@@ -42,6 +43,7 @@ def _spool_frames(
     paths = []
 
     for index, frame in processor.extract_frames():
+        check_cancelled()
         path = os.path.join(spool_dir, 'frame_%06d.png' % index)
         if not imwrite(path, frame):
             raise RuntimeError('Could not write frame %d to %s' % (index, path))
@@ -123,6 +125,7 @@ def reverse_video(
         )
         try:
             for position, path in enumerate(reversed(frame_paths)):
+                check_cancelled()
                 frame = imread(path)
                 if frame is None:
                     raise RuntimeError('Could not read spooled frame %s' % path)
@@ -277,6 +280,9 @@ def reverse_batch(
                     output_dir=output_dir,
                 )
             )
+        except OperationCancelled:
+            # A stop ends the whole batch; it is not one file failing.
+            raise
         except Exception as exc:  # noqa: BLE001 - keep the batch going
             logger.error('Failed to reverse %s: %s', path, exc)
             results.append({
