@@ -30,6 +30,31 @@ current_upscaler = None
 current_interpolator = None
 processing_cancelled = False
 
+# Dropdown label -> the name SpatialUpscaler expects. A value of None marks a
+# model that is listed but not implemented, so the UI can say so instead of
+# failing somewhere deeper.
+SPATIAL_MODELS = {
+    "Real-ESRGAN (Fast, Excellent Quality)": "realesrgan",
+    "SwinIR (Slow, Maximum Quality)": "swinir",
+    "SwinIR Large (Slowest, Highest Quality)": "swinir_large",
+}
+
+
+def parse_model_choice(label):
+    """Map a dropdown label to a model name, or None if it is not implemented."""
+    if label in SPATIAL_MODELS:
+        return SPATIAL_MODELS[label]
+
+    # Labels have been reworded before; match on the distinctive part so an
+    # older saved choice still resolves.
+    if "SwinIR Large" in label:
+        return "swinir_large"
+    if "SwinIR" in label:
+        return "swinir"
+    if "SeedVR2" in label:
+        return None
+    return "realesrgan"
+
 
 def get_system_info():
     """Get system information for display"""
@@ -152,14 +177,9 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
         progress(0, desc="Initializing...")
 
         # Parse model name
-        if "Real-ESRGAN" in model:
-            model_name = "realesrgan"
-        elif "SwinIR" in model:
-            return None, "❌ SwinIR not yet implemented"
-        elif "SeedVR2" in model:
-            return None, "❌ SeedVR2 not yet implemented"
-        else:
-            model_name = "realesrgan"
+        model_name = parse_model_choice(model)
+        if model_name is None:
+            return None, f"❌ {model.split('(')[0].strip()} is not implemented yet"
 
         # Create temp paths
         upscaled_path = tempfile.mktemp(suffix='_upscaled.mp4')
@@ -397,14 +417,9 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
         progress(0, desc="Initializing...")
 
         # Parse model name
-        if "Real-ESRGAN" in model:
-            model_name = "realesrgan"
-        elif "SwinIR" in model:
-            return None, "❌ SwinIR not yet implemented", []
-        elif "SeedVR2" in model:
-            return None, "❌ SeedVR2 not yet implemented", []
-        else:
-            model_name = "realesrgan"
+        model_name = parse_model_choice(model)
+        if model_name is None:
+            return None, f"❌ {model.split('(')[0].strip()} is not implemented yet", []
 
         # Create upscaler
         progress(0.05, desc="Loading AI model...")
@@ -536,11 +551,7 @@ def create_interface():
                             gr.Markdown("### ⚙️ Upscaling Settings")
 
                             spatial_model = gr.Dropdown(
-                                choices=[
-                                    "Real-ESRGAN (Fast, Excellent Quality)",
-                                    "SwinIR (Slow, Maximum Quality) - Coming Soon",
-                                    "SeedVR2 (Temporal Coherence, High VRAM) - Coming Soon"
-                                ],
+                                choices=list(SPATIAL_MODELS),
                                 label="AI Model",
                                 value="Real-ESRGAN (Fast, Excellent Quality)",
                                 info="Choose the model based on your needs and hardware"
@@ -838,7 +849,6 @@ def create_interface():
                     temporal_method = gr.Radio(
                         choices=[
                             "Auto (Recommended)",
-                            "SeedVR2",
                             "Optical Flow",
                             "EMA Filter"
                         ],

@@ -48,11 +48,14 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
   - System information display
   - Before/after comparison
 
+- **🔬 SwinIR Upscaling** ✅
+  - Transformer-based, slower than Real-ESRGAN but more detailed
+  - Standard and Large variants
+
 ### Coming Soon
 
-- **SwinIR**: Maximum quality upscaling
-- **SeedVR2**: Temporal coherence for flicker-free results
-- **DAIN**: Advanced frame interpolation
+- **BasicVSR++**: temporal coherence for flicker-free results
+- **RIFE / DAIN**: frame interpolation
 - **Quality Metrics**: PSNR, SSIM, flickering scores
 - **Batch Processing**: Process multiple videos at once
 
@@ -240,7 +243,27 @@ venv\Scripts\python.exe scripts\verify_install.py
 |-------|----------|-------|------|---------|
 | **Real-ESRGAN** | General use, realistic videos | Fast | 4-8 GB | Excellent |
 | **SwinIR** | Photo-realistic, detailed content | Slow | 6-10 GB | Maximum |
-| **SeedVR2** | Videos with temporal artifacts | Medium | 16-24 GB | Excellent + Coherence |
+| **SwinIR Large** | Stills and short clips | Slowest | 10-16 GB | Highest |
+
+**Notes on SwinIR.** The architecture comes from the installed `basicsr`, so
+only the weights are downloaded (64 MB for x4, 142 MB for Large).
+
+It always runs in **fp32**, whatever the global half-precision setting says:
+its attention overflows the fp16 range and the network returns all-NaN, which
+does not raise — it just yields a corrupted frame. bfloat16 is numerically
+correct but measured roughly 15× slower than fp32 here, so it is not used
+either.
+
+At **x4** it uses the real-world SR checkpoint, trained on realistic
+degradations. At **x2** it uses the *classical* SR checkpoint, because the
+official x2 real-world weights were trained with an upsampler (`nearest+conv`)
+that `basicsr` only implements at x4. Classical SR is trained on clean bicubic
+downscaling, so x2 is sharper on clean sources and less forgiving of
+compression artefacts than x4. For noisy or heavily compressed footage, x4 is
+the better model even if you then scale back down.
+
+SwinIR tiles by default, sized from the available VRAM, because it needs far
+more memory than Real-ESRGAN at the same resolution.
 
 ### FPS Interpolation
 

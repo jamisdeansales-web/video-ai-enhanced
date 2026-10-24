@@ -87,6 +87,24 @@ class SpatialUpscaler:
 
                 logger.info(f"Real-ESRGAN {self.ai_model_scale}× model loaded successfully")
 
+            elif self.model_name.lower() in ('swinir', 'swinir_large'):
+                from models.swinir_model import create_swinir_model
+
+                settings = self.sys_manager.optimal_settings
+
+                # SwinIR needs far more VRAM than Real-ESRGAN, so leave the
+                # tile size to the factory rather than reusing the shared
+                # setting tuned for Real-ESRGAN.
+                self.model = create_swinir_model(
+                    scale=self.ai_model_scale,
+                    device=self.device,
+                    fp16=settings['use_fp16'],
+                    tile_size=0,
+                    large=self.model_name.lower() == 'swinir_large',
+                )
+
+                logger.info(f"SwinIR {self.ai_model_scale}× model loaded successfully")
+
             else:
                 raise NotImplementedError(f"Model {self.model_name} not yet implemented")
 

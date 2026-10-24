@@ -30,6 +30,27 @@ MODEL_URLS = {
         'filename': 'RealESRGAN_x4plus_anime_6B.pth',
         'md5': None,
     },
+    # SwinIR real-world SR checkpoints. The architecture itself comes from
+    # basicsr; only these weights are downloaded. The hyper-parameters each one
+    # expects are in src/models/swinir_model.py (MODEL_CONFIGS).
+    # Classical SR rather than real-world SR: the x2 real-world checkpoint uses
+    # an upsampler basicsr only implements at x4. See MODEL_CONFIGS in
+    # src/models/swinir_model.py.
+    'swinir_x2': {
+        'url': 'https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth',
+        'filename': '001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth',
+        'md5': None,
+    },
+    'swinir_x4': {
+        'url': 'https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth',
+        'filename': '003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth',
+        'md5': None,
+    },
+    'swinir_x4_large': {
+        'url': 'https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth',
+        'filename': '003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth',
+        'md5': None,
+    },
 }
 
 

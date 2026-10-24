@@ -16,6 +16,32 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _resolve_ffmpeg(tool: str = 'ffmpeg') -> Optional[str]:
+    """
+    Locate ffmpeg or ffprobe.
+
+    The installer provides imageio-ffmpeg, a wheel carrying its own ffmpeg
+    binary, and does not put ffmpeg on PATH. Calling a bare "ffmpeg" therefore
+    failed on a clean install and the audio track was dropped without a word.
+    The bundled binary is preferred, with PATH as the fallback.
+
+    imageio-ffmpeg ships no ffprobe, so that one can still only come from PATH.
+    """
+    if tool == 'ffmpeg':
+        try:
+            import imageio_ffmpeg
+
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:  # noqa: BLE001 - fall through to PATH
+            pass
+
+    return shutil.which(tool)
+
+
+FFMPEG_BIN = _resolve_ffmpeg('ffmpeg')
+FFPROBE_BIN = _resolve_ffmpeg('ffprobe')
+
+
 # Containers OpenCV's FFmpeg backend decodes for us. WebM (VP8/VP9) reads
 # natively, so uploads do not need transcoding before processing.
 SUPPORTED_INPUT_EXTENSIONS = (
@@ -259,21 +285,43 @@ class VideoProcessor:
         Returns:
             bool: True if audio exists
         """
-        try:
-            cmd = [
-                'ffprobe',
-                '-i', self.video_path,
-                '-show_streams',
-                '-select_streams', 'a',
-                '-loglevel', 'error'
-            ]
+        # ffprobe is the precise answer, but imageio-ffmpeg does not ship one.
+        # ffmpeg can report the same thing, so fall back to it before giving up.
+        if FFPROBE_BIN:
+            try:
+                result = subprocess.run(
+                    [
+                        FFPROBE_BIN,
+                        '-i', self.video_path,
+                        '-show_streams',
+                        '-select_streams', 'a',
+                        '-loglevel', 'error',
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                return len(result.stdout) > 0
+            except OSError as exc:
+                logger.warning("ffprobe could not be run (%s)", exc)
 
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return len(result.stdout) > 0
+        if FFMPEG_BIN:
+            try:
+                # "ffmpeg -i" with no output lists the streams on stderr and
+                # exits non-zero; the listing is what we are after.
+                result = subprocess.run(
+                    [FFMPEG_BIN, '-hide_banner', '-i', self.video_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                return b'Audio:' in result.stderr
+            except OSError as exc:
+                logger.warning("ffmpeg could not be run (%s)", exc)
 
-        except FileNotFoundError:
-            # FFprobe not available, assume audio exists
-            return True
+        logger.warning(
+            "Neither ffmpeg nor ffprobe is available; assuming the video has "
+            "audio. Install imageio-ffmpeg or put ffmpeg on PATH."
+        )
+        return True
 
     def close(self):
         """Release video capture"""
@@ -383,9 +431,18 @@ class VideoWriter:
 
     def _copy_audio(self):
         """Copy audio from source video using FFmpeg"""
+        if not FFMPEG_BIN:
+            logger.warning(
+                "FFmpeg not found. Video will not have audio. Install "
+                "imageio-ffmpeg or put ffmpeg on PATH."
+            )
+            if os.path.exists(self.temp_path):
+                shutil.move(self.temp_path, self.output_path)
+            return
+
         try:
             cmd = [
-                'ffmpeg',
+                FFMPEG_BIN,
                 '-i', self.temp_path,
                 '-i', self.audio_source,
                 '-c:v', 'copy',
