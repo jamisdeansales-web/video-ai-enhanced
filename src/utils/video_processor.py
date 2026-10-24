@@ -16,6 +16,72 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _resolve_ffmpeg(tool: str = 'ffmpeg') -> Optional[str]:
+    """
+    Locate ffmpeg or ffprobe.
+
+    The installer provides imageio-ffmpeg, a wheel carrying its own ffmpeg
+    binary, and does not put ffmpeg on PATH. Calling a bare "ffmpeg" therefore
+    failed on a clean install and the audio track was dropped without a word.
+    The bundled binary is preferred, with PATH as the fallback.
+
+    imageio-ffmpeg ships no ffprobe, so that one can still only come from PATH.
+    """
+    if tool == 'ffmpeg':
+        try:
+            import imageio_ffmpeg
+
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:  # noqa: BLE001 - fall through to PATH
+            pass
+
+    return shutil.which(tool)
+
+
+FFMPEG_BIN = _resolve_ffmpeg('ffmpeg')
+FFPROBE_BIN = _resolve_ffmpeg('ffprobe')
+
+
+# Encoders driven through ffmpeg, by the name the UI and callers use. Anything
+# not listed here is treated as an OpenCV FourCC and handed to cv2.VideoWriter.
+FFMPEG_CODECS = {
+    'h264': 'libx264',
+    'h265': 'libx265',
+}
+
+# mp4v (MPEG-4 Part 2) was the only option and is a poor one at high
+# resolutions: no modern rate control, large files, visible blocking. H.264 is
+# the default now and mp4v stays available as a fallback.
+DEFAULT_CODEC = 'h264'
+
+# Constant Rate Factor: lower is better quality and a larger file. 18 is
+# near-transparent for H.264 and suits footage that was just upscaled.
+DEFAULT_CRF = 18
+DEFAULT_PRESET = 'medium'
+
+
+# Containers OpenCV's FFmpeg backend decodes for us. WebM (VP8/VP9) reads
+# natively, so uploads do not need transcoding before processing.
+SUPPORTED_INPUT_EXTENSIONS = (
+    '.mp4',
+    '.webm',
+    '.mkv',
+    '.mov',
+    '.avi',
+    '.m4v',
+    '.mpg',
+    '.mpeg',
+    '.wmv',
+    '.flv',
+    '.ts',
+)
+
+
+def is_supported_input(video_path: str) -> bool:
+    """Whether the file extension is one we expect to be able to decode."""
+    return Path(video_path).suffix.lower() in SUPPORTED_INPUT_EXTENSIONS
+
+
 class VideoProcessor:
     """Handle video processing operations"""
 
@@ -37,7 +103,12 @@ class VideoProcessor:
         self.cap = cv2.VideoCapture(video_path)
 
         if not self.cap.isOpened():
-            raise ValueError(f"Cannot open video file: {video_path}")
+            extension = Path(video_path).suffix.lower() or '(none)'
+            raise ValueError(
+                f"Cannot open video file: {video_path}\n"
+                f"Format {extension} could not be decoded. "
+                f"Supported formats: {', '.join(SUPPORTED_INPUT_EXTENSIONS)}"
+            )
 
         self._metadata = self._extract_metadata()
 
@@ -56,10 +127,22 @@ class VideoProcessor:
             'codec': int(self.cap.get(cv2.CAP_PROP_FOURCC)),
         }
 
+        metadata['codec_name'] = self._fourcc_to_name(metadata['codec'])
+        metadata['container'] = Path(self.video_path).suffix.lower().lstrip('.')
+
         metadata['duration'] = metadata['frame_count'] / metadata['fps'] if metadata['fps'] > 0 else 0
         metadata['resolution'] = (metadata['width'], metadata['height'])
 
         return metadata
+
+    @staticmethod
+    def _fourcc_to_name(fourcc: int) -> str:
+        """Decode a FOURCC integer into its four-character name, e.g. VP90."""
+        if not fourcc:
+            return 'unknown'
+        name = ''.join(chr((fourcc >> (8 * i)) & 0xFF) for i in range(4))
+        name = ''.join(c for c in name if c.isprintable()).strip()
+        return name or 'unknown'
 
     def get_metadata(self) -> Dict:
         """
@@ -188,26 +271,51 @@ class VideoProcessor:
         """
         try:
             cmd = [
-                'ffmpeg',
-                '-i', self.video_path,
+                FFMPEG_BIN or 'ffmpeg',
+                # -ss goes before -i so ffmpeg seeks the input. After -i it
+                # decodes and discards instead, and combined with "-c copy"
+                # below it wrote a 261-byte file with no frames at all.
                 '-ss', str(start_time),
                 '-t', str(duration),
-                '-c', 'copy',
+                '-i', self.video_path,
+                # Re-encode rather than stream-copy: a copy can only cut on a
+                # keyframe, so a short segment often came out empty.
+                '-c:v', 'libx264',
+                '-preset', 'veryfast',
+                '-crf', '18',
+                '-c:a', 'aac',
                 '-y',
                 output_path
             ]
 
-            result = subprocess.run(
+            subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True
             )
 
-            return os.path.exists(output_path)
+            # The file existing is not enough; ffmpeg writes a valid container
+            # with zero frames quite happily.
+            if not os.path.exists(output_path):
+                logger.error("Segment extraction produced no file")
+                return False
+
+            probe = cv2.VideoCapture(output_path)
+            frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT)) if probe.isOpened() else 0
+            probe.release()
+
+            if frames < 1:
+                logger.error(
+                    "Segment extraction produced an unreadable or empty file: %s",
+                    output_path,
+                )
+                return False
+
+            return True
 
         except subprocess.CalledProcessError as e:
-            logger.error(f"FFmpeg error: {e.stderr.decode()}")
+            logger.error(f"FFmpeg error: {e.stderr.decode(errors='replace')}")
             return False
         except FileNotFoundError:
             logger.error("FFmpeg not found. Please install FFmpeg.")
@@ -220,21 +328,43 @@ class VideoProcessor:
         Returns:
             bool: True if audio exists
         """
-        try:
-            cmd = [
-                'ffprobe',
-                '-i', self.video_path,
-                '-show_streams',
-                '-select_streams', 'a',
-                '-loglevel', 'error'
-            ]
+        # ffprobe is the precise answer, but imageio-ffmpeg does not ship one.
+        # ffmpeg can report the same thing, so fall back to it before giving up.
+        if FFPROBE_BIN:
+            try:
+                result = subprocess.run(
+                    [
+                        FFPROBE_BIN,
+                        '-i', self.video_path,
+                        '-show_streams',
+                        '-select_streams', 'a',
+                        '-loglevel', 'error',
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                return len(result.stdout) > 0
+            except OSError as exc:
+                logger.warning("ffprobe could not be run (%s)", exc)
 
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return len(result.stdout) > 0
+        if FFMPEG_BIN:
+            try:
+                # "ffmpeg -i" with no output lists the streams on stderr and
+                # exits non-zero; the listing is what we are after.
+                result = subprocess.run(
+                    [FFMPEG_BIN, '-hide_banner', '-i', self.video_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                return b'Audio:' in result.stderr
+            except OSError as exc:
+                logger.warning("ffmpeg could not be run (%s)", exc)
 
-        except FileNotFoundError:
-            # FFprobe not available, assume audio exists
-            return True
+        logger.warning(
+            "Neither ffmpeg nor ffprobe is available; assuming the video has "
+            "audio. Install imageio-ffmpeg or put ffmpeg on PATH."
+        )
+        return True
 
     def close(self):
         """Release video capture"""
@@ -263,8 +393,10 @@ class VideoWriter:
         output_path: str,
         fps: float,
         resolution: Tuple[int, int],
-        codec: str = 'mp4v',
-        audio_source: Optional[str] = None
+        codec: str = DEFAULT_CODEC,
+        audio_source: Optional[str] = None,
+        crf: int = DEFAULT_CRF,
+        preset: str = DEFAULT_PRESET,
     ):
         """
         Initialize video writer
@@ -273,13 +405,23 @@ class VideoWriter:
             output_path: Output video path
             fps: Frames per second
             resolution: (width, height)
-            codec: Video codec fourcc
+            codec: 'h264' or 'h265' to encode through ffmpeg, or a FourCC such
+                as 'mp4v' to go through OpenCV. h264 is the default: mp4v is
+                MPEG-4 Part 2, which at 4K produces large files for mediocre
+                quality.
             audio_source: Path to video with audio to copy
+            crf: Constant Rate Factor for the ffmpeg encoders, 0-51. Lower is
+                better quality and a bigger file; 18 is near-transparent, 23 is
+                the x264 default. Ignored for FourCC codecs.
+            preset: x264/x265 speed preset. Ignored for FourCC codecs.
         """
         self.output_path = output_path
         self.fps = fps
         self.resolution = resolution
         self.audio_source = audio_source
+        self.codec = codec
+        self.crf = crf
+        self.preset = preset
 
         # Create temporary file for video without audio
         self.temp_path = None
@@ -289,19 +431,87 @@ class VideoWriter:
         else:
             actual_output = output_path
 
-        # Initialize VideoWriter
-        fourcc = cv2.VideoWriter_fourcc(*codec)
-        self.writer = cv2.VideoWriter(
-            actual_output,
-            fourcc,
-            fps,
-            resolution
-        )
+        self.process = None
+        self.writer = None
+        self._stderr_file = None
 
-        if not self.writer.isOpened():
-            raise ValueError(f"Cannot create video writer for: {output_path}")
+        if codec in FFMPEG_CODECS and FFMPEG_BIN:
+            self._open_ffmpeg(actual_output)
+        else:
+            if codec in FFMPEG_CODECS:
+                logger.warning(
+                    "ffmpeg is not available; falling back to the mp4v "
+                    "encoder, which gives larger files at lower quality."
+                )
+                self.codec = 'mp4v'
+            self._open_opencv(actual_output)
 
         self.frame_count = 0
+
+    def _open_ffmpeg(self, actual_output: str):
+        """Start an ffmpeg process that we feed raw frames to over stdin."""
+        width, height = self.resolution
+
+        # x264 and x265 need even dimensions for yuv420p. A scale filter is
+        # cheaper than refusing an odd size that an arbitrary scale factor can
+        # easily produce.
+        even_w, even_h = width - (width % 2), height - (height % 2)
+
+        cmd = [
+            FFMPEG_BIN,
+            '-hide_banner', '-loglevel', 'error',
+            '-f', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', '%dx%d' % (width, height),
+            '-r', str(self.fps),
+            '-i', '-',
+            '-an',
+            '-c:v', FFMPEG_CODECS[self.codec],
+            '-crf', str(self.crf),
+            '-preset', self.preset,
+            '-pix_fmt', 'yuv420p',
+        ]
+        if (even_w, even_h) != (width, height):
+            cmd += ['-vf', 'scale=%d:%d' % (even_w, even_h)]
+        cmd += ['-y', actual_output]
+
+        # ffmpeg's stderr goes to a file, not a pipe. A pipe nobody reads fills
+        # its OS buffer (~64 KB) and then blocks ffmpeg forever, which blocks
+        # our next frame write: a long encode would hang with no error at all.
+        self._stderr_file = tempfile.TemporaryFile()
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=self._stderr_file,
+        )
+
+    def _read_stderr(self) -> str:
+        """Read back whatever ffmpeg reported, without consuming the handle."""
+        if self._stderr_file is None:
+            return ''
+        try:
+            self._stderr_file.seek(0)
+            return self._stderr_file.read().decode(errors='replace').strip()
+        except (OSError, ValueError):
+            return ''
+
+    def _close_stderr(self):
+        if self._stderr_file is not None:
+            try:
+                self._stderr_file.close()
+            except OSError:
+                pass
+            self._stderr_file = None
+
+    def _open_opencv(self, actual_output: str):
+        """Legacy path: let OpenCV mux a FourCC codec."""
+        fourcc = cv2.VideoWriter_fourcc(*self.codec)
+        self.writer = cv2.VideoWriter(actual_output, fourcc, self.fps, self.resolution)
+
+        if not self.writer.isOpened():
+            raise ValueError(f"Cannot create video writer for: {self.output_path}")
 
     def write_frame(self, frame: np.ndarray):
         """
@@ -314,7 +524,21 @@ class VideoWriter:
         if frame.shape[1] != self.resolution[0] or frame.shape[0] != self.resolution[1]:
             frame = cv2.resize(frame, self.resolution)
 
-        self.writer.write(frame)
+        if self.process is not None:
+            if not np.ascontiguousarray(frame).dtype == np.uint8:
+                frame = frame.astype(np.uint8)
+            try:
+                self.process.stdin.write(np.ascontiguousarray(frame).tobytes())
+            except (BrokenPipeError, OSError) as exc:
+                # ffmpeg died; its own message says why and is worth more than
+                # the write error alone.
+                raise RuntimeError(
+                    "ffmpeg stopped while encoding: %s"
+                    % (self._read_stderr() or exc)
+                )
+        else:
+            self.writer.write(frame)
+
         self.frame_count += 1
 
     def write_frames(self, frames: List[np.ndarray]):
@@ -338,15 +562,42 @@ class VideoWriter:
             self.writer.release()
             self.writer = None
 
+        if self.process is not None:
+            # Closing stdin tells ffmpeg the stream is over; it then flushes
+            # and writes the container trailer, so it has to finish before the
+            # file can be read or muxed.
+            process, self.process = self.process, None
+            try:
+                if process.stdin:
+                    process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+            process.wait()
+            if process.returncode not in (0, None):
+                raise RuntimeError(
+                    "ffmpeg failed to encode the video: %s" % self._read_stderr()
+                )
+            self._close_stderr()
+
         # Copy audio if source provided
         if copy_audio and self.audio_source and self.temp_path:
             self._copy_audio()
 
     def _copy_audio(self):
         """Copy audio from source video using FFmpeg"""
+        if not FFMPEG_BIN:
+            logger.warning(
+                "FFmpeg not found. Video will not have audio. Install "
+                "imageio-ffmpeg or put ffmpeg on PATH."
+            )
+            if os.path.exists(self.temp_path):
+                shutil.move(self.temp_path, self.output_path)
+            return
+
         try:
             cmd = [
-                'ffmpeg',
+                FFMPEG_BIN,
                 '-i', self.temp_path,
                 '-i', self.audio_source,
                 '-c:v', 'copy',
@@ -390,7 +641,16 @@ class VideoWriter:
 
     def __del__(self):
         """Destructor"""
-        self.close(copy_audio=False)
+        # close() now raises when ffmpeg failed, which a destructor must not
+        # do: Python can only print "Exception ignored in __del__" over the
+        # real error the caller is already handling. Releasing the handles is
+        # all that matters here.
+        try:
+            self.close(copy_audio=False)
+        except Exception:  # noqa: BLE001 - nothing can act on it at this point
+            pass
+        finally:
+            self._close_stderr()
 
 
 def get_video_info(video_path: str) -> Dict:

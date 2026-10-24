@@ -10,7 +10,8 @@ from pathlib import Path
 import logging
 
 from models.realesrgan_model import create_realesrgan_model
-from utils.video_processor import VideoProcessor, VideoWriter
+from utils.cancellation import OperationCancelled, check as check_cancelled
+from utils.video_processor import DEFAULT_CODEC, DEFAULT_CRF, VideoProcessor, VideoWriter
 from utils.system_manager import get_system_manager
 
 logger = logging.getLogger(__name__)
@@ -25,22 +26,29 @@ class SpatialUpscaler:
         self,
         model_name: str = 'realesrgan',
         scale_factor: float = 4.0,
-        device: str = 'auto'
+        device: str = 'auto',
+        codec: str = DEFAULT_CODEC,
+        crf: int = DEFAULT_CRF
     ):
         """
         Initialize spatial upscaler
 
         Args:
-            model_name: Model to use ('realesrgan', 'swinir', 'seedvr2')
+            model_name: Model to use ('realesrgan', 'swinir')
             scale_factor: Scaling factor (0.1 to 16.0)
                          - Values >= 1.0: Upscaling
                          - Values < 1.0: Downscaling
                          - 2.0, 4.0: Optimal (pure AI)
                          - Other values: Hybrid (AI + resize)
             device: 'cuda', 'cpu', or 'auto'
+            codec: Output codec: 'h264', 'h265', or a FourCC such as 'mp4v'
+            crf: Quality for the ffmpeg codecs; lower is better, 18 is
+                near-transparent
         """
         self.model_name = model_name
         self.scale_factor = float(scale_factor)
+        self.codec = codec
+        self.crf = crf
 
         # Get system manager
         self.sys_manager = get_system_manager()
@@ -86,6 +94,24 @@ class SpatialUpscaler:
                 )
 
                 logger.info(f"Real-ESRGAN {self.ai_model_scale}× model loaded successfully")
+
+            elif self.model_name.lower() in ('swinir', 'swinir_large'):
+                from models.swinir_model import create_swinir_model
+
+                settings = self.sys_manager.optimal_settings
+
+                # SwinIR needs far more VRAM than Real-ESRGAN, so leave the
+                # tile size to the factory rather than reusing the shared
+                # setting tuned for Real-ESRGAN.
+                self.model = create_swinir_model(
+                    scale=self.ai_model_scale,
+                    device=self.device,
+                    fp16=settings['use_fp16'],
+                    tile_size=0,
+                    large=self.model_name.lower() == 'swinir_large',
+                )
+
+                logger.info(f"SwinIR {self.ai_model_scale}× model loaded successfully")
 
             else:
                 raise NotImplementedError(f"Model {self.model_name} not yet implemented")
@@ -169,7 +195,9 @@ class SpatialUpscaler:
                     output_path,
                     fps=metadata['fps'],
                     resolution=(output_width, output_height),
-                    audio_source=input_path
+                    audio_source=input_path,
+                    codec=self.codec,
+                    crf=self.crf
                 ) as writer:
 
                     # Process frames
@@ -177,6 +205,8 @@ class SpatialUpscaler:
                     frame_times = []
 
                     for frame_idx, frame in vp.extract_frames(start_frame, end_frame):
+                        # Between frames: responsive without costing throughput.
+                        check_cancelled()
                         frame_start = time.time()
 
                         # Upscale frame
@@ -228,6 +258,11 @@ class SpatialUpscaler:
                 }
             }
 
+        except OperationCancelled:
+            # A stop is not a failure; let it reach the caller so the UI can
+            # say "stopped" rather than report an error.
+            logger.info("Video upscaling stopped at the user's request")
+            raise
         except Exception as e:
             logger.error(f"Error during video upscaling: {e}", exc_info=True)
             return {
@@ -341,6 +376,9 @@ class SpatialUpscaler:
                 progress_callback=progress_callback
             )
 
+        except OperationCancelled:
+            logger.info("Preview stopped at the user's request")
+            raise
         except Exception as e:
             logger.error(f"Error creating preview: {e}")
             return {
@@ -414,7 +452,9 @@ class SpatialUpscaler:
 def create_upscaler(
     model_name: str = 'realesrgan',
     scale_factor: int = 4,
-    device: str = 'auto'
+    device: str = 'auto',
+    codec: str = DEFAULT_CODEC,
+    crf: int = DEFAULT_CRF
 ) -> SpatialUpscaler:
     """
     Factory function to create upscaler
@@ -430,5 +470,7 @@ def create_upscaler(
     return SpatialUpscaler(
         model_name=model_name,
         scale_factor=scale_factor,
-        device=device
+        device=device,
+        codec=codec,
+        crf=crf
     )

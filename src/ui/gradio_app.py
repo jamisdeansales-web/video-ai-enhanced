@@ -19,14 +19,113 @@ logger = logging.getLogger(__name__)
 
 # Import our modules
 from utils.system_manager import get_system_manager
-from utils.video_processor import VideoProcessor, format_duration
+from utils.video_processor import (
+    DEFAULT_CODEC,
+    DEFAULT_CRF,
+    FFMPEG_CODECS,
+    VideoProcessor,
+    format_duration,
+)
 from processors.spatial_upscaler import create_upscaler
 from processors.temporal_interpolator import create_interpolator
+from processors.video_reverser import COMBINE_MODES, reverse_batch
+from processors.frame_exporter import IMAGE_FORMATS, clear_export_dir, export_frames
+from utils.cancellation import OperationCancelled, request_stop, reset as reset_stop
+from utils.image_io import resolve_output_dir
+from utils.quality_metrics import compare_videos, format_metric_rows
 
 # Global state
 current_upscaler = None
 current_interpolator = None
-processing_cancelled = False
+
+# Dropdown label -> the name SpatialUpscaler expects. A value of None marks a
+# model that is listed but not implemented, so the UI can say so instead of
+# failing somewhere deeper.
+SPATIAL_MODELS = {
+    "Real-ESRGAN (Fast, Excellent Quality)": "realesrgan",
+    "SwinIR (Slow, Maximum Quality)": "swinir",
+    "SwinIR Large (Slowest, Highest Quality)": "swinir_large",
+    "BasicVSR++ (Temporal Coherence, 4x native)": "basicvsrpp",
+}
+
+# Models that read a run of frames instead of one at a time, and so go through
+# TemporalUpscaler rather than SpatialUpscaler.
+TEMPORAL_MODELS = {"basicvsrpp"}
+
+
+def parse_model_choice(label):
+    """Map a dropdown label to a model name, or None if it is not implemented."""
+    if label in SPATIAL_MODELS:
+        return SPATIAL_MODELS[label]
+
+    # Labels have been reworded before; match on the distinctive part so an
+    # older saved choice still resolves.
+    if "SwinIR Large" in label:
+        return "swinir_large"
+    if "SwinIR" in label:
+        return "swinir"
+    if "BasicVSR" in label:
+        return "basicvsrpp"
+    if "SeedVR2" in label:
+        return None
+    return "realesrgan"
+
+
+# The running Blocks, so handlers can widen what Gradio is allowed to serve.
+_blocks = None
+
+
+def allow_output_path(path):
+    """
+    Let Gradio serve files from `path`.
+
+    Gradio only serves files under the working directory, the system temp
+    directory, or whatever was passed to launch(allowed_paths=...). Returning a
+    file from anywhere else raises InvalidPathError *after* the work is done -
+    the export succeeds, then the gallery refuses to show it.
+
+    The output folder is chosen at run time, long after launch(), but
+    gradio.processing_utils._check_allowed reads blocks.allowed_paths on every
+    call, so appending to it here takes effect immediately.
+    """
+    if not path:
+        return
+
+    blocks = _blocks
+    if blocks is None:
+        try:
+            from gradio.context import LocalContext
+
+            blocks = LocalContext.blocks.get(None)
+        except Exception:  # noqa: BLE001 - internal API, never fail over it
+            blocks = None
+    if blocks is None:
+        return
+
+    absolute = os.path.abspath(path)
+    try:
+        if absolute not in blocks.allowed_paths:
+            blocks.allowed_paths.append(absolute)
+            logger.info("Allowed Gradio to serve files from %s", absolute)
+    except AttributeError:
+        pass
+
+
+def build_upscaler(model_name, scale, device='auto',
+                   codec=DEFAULT_CODEC, crf=DEFAULT_CRF):
+    """Create the right upscaler for the chosen model."""
+    if model_name in TEMPORAL_MODELS:
+        from processors.temporal_upscaler import create_temporal_upscaler
+
+        return create_temporal_upscaler(
+            model_name=model_name, scale_factor=scale, device=device,
+            codec=codec, crf=crf,
+        )
+
+    return create_upscaler(
+        model_name=model_name, scale_factor=scale, device=device,
+        codec=codec, crf=crf,
+    )
 
 
 def get_system_info():
@@ -52,7 +151,8 @@ def on_video_upload(video):
         info = f"📹 Resolution: {metadata['width']}x{metadata['height']}\n"
         info += f"🎞️ FPS: {metadata['fps']:.2f}\n"
         info += f"⏱️ Duration: {format_duration(metadata['duration'])}\n"
-        info += f"🎬 Frames: {metadata['frame_count']:,}"
+        info += f"🎬 Frames: {metadata['frame_count']:,}\n"
+        info += f"📦 Format: {metadata['container']} ({metadata['codec_name']})"
 
         # Default output resolution (4x)
         output_res = f"{metadata['width']*4}x{metadata['height']*4} (4K)"
@@ -149,14 +249,9 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
         progress(0, desc="Initializing...")
 
         # Parse model name
-        if "Real-ESRGAN" in model:
-            model_name = "realesrgan"
-        elif "SwinIR" in model:
-            return None, "❌ SwinIR not yet implemented"
-        elif "SeedVR2" in model:
-            return None, "❌ SeedVR2 not yet implemented"
-        else:
-            model_name = "realesrgan"
+        model_name = parse_model_choice(model)
+        if model_name is None:
+            return None, f"❌ {model.split('(')[0].strip()} is not implemented yet"
 
         # Create temp paths
         upscaled_path = tempfile.mktemp(suffix='_upscaled.mp4')
@@ -170,11 +265,7 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
         # Step 1: Upscale
         progress(0.1, desc="Loading upscaling model...")
         try:
-            upscaler = create_upscaler(
-                model_name=model_name,
-                scale_factor=float(scale),
-                device='auto'
-            )
+            upscaler = build_upscaler(model_name, float(scale))
         except ImportError as ie:
             if "Real-ESRGAN not available" in str(ie):
                 error_msg = "❌ Real-ESRGAN not available\n\n"
@@ -257,12 +348,170 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
 
             return output_path, status
 
+    except OperationCancelled:
+        logger.info("Preview stopped by the user")
+        return None, "⏹️ Stopped."
     except Exception as e:
         logger.error(f"Error in preview: {e}", exc_info=True)
         return None, f"❌ Error: {str(e)}"
 
 
-def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal, progress=gr.Progress()):
+def process_reverse(files, keep_frames, combine_mode, output_folder=None,
+                    progress=gr.Progress()):
+    """
+    Reverse one or more uploaded videos.
+
+    Returns the status report, the first input as the original preview, the last
+    reversed clip, the combined clip when one was produced, and every kept frame
+    for the gallery.
+    """
+    if not files:
+        return "No video selected.", None, None, None, []
+
+    # gr.File hands back either paths or objects carrying one, depending on the
+    # component's type; accept both so the tab works either way.
+    paths = [getattr(f, "name", f) for f in files]
+
+    def on_progress(index, total, name):
+        progress((index - 1) / total, desc=f"Reversing {name} ({index}/{total})")
+
+    try:
+        output_dir = resolve_output_dir(output_folder, "video_reverser_outputs")
+    except OSError as exc:
+        return f"❌ {exc}", None, None, None, []
+
+    allow_output_path(output_dir)
+    reset_stop()
+
+    try:
+        results = reverse_batch(
+            paths,
+            combine_mode=combine_mode,
+            keep_frames=keep_frames,
+            output_dir=output_dir,
+            progress_callback=on_progress,
+        )
+    except OperationCancelled:
+        logger.info("Reverse stopped by the user")
+        return "⏹️ Stopped.", None, None, None, []
+
+    succeeded = [r for r in results if r.get("success")]
+    failed = [r for r in results if not r.get("success")]
+
+    lines = []
+    for result in results:
+        name = os.path.basename(result.get("input_path", "?"))
+        if result.get("success"):
+            detail = f"{result['frame_count']} frames in {result['elapsed']:.1f}s"
+            if result.get("combined_path"):
+                detail += f", combined ({combine_mode})"
+            lines.append(f"✅ {name}: {detail}")
+        else:
+            lines.append(f"❌ {name}: {result.get('error', 'unknown error')}")
+
+    summary = f"{len(succeeded)}/{len(results)} reversed"
+    if failed:
+        summary += f", {len(failed)} failed"
+    summary += f"\n📁 {output_dir}"
+    report = summary + "\n\n" + "\n".join(lines)
+
+    if not succeeded:
+        return report, None, None, None, []
+
+    last = succeeded[-1]
+    gallery = [frame for r in succeeded for frame in r.get("frames", [])]
+
+    return (
+        report,
+        last.get("input_path"),
+        last.get("output_path"),
+        last.get("combined_path"),
+        gallery,
+    )
+
+
+# A long export can run to thousands of stills; the browser only gets a slice,
+# and the zip or the folder carries the rest.
+GALLERY_PREVIEW_LIMIT = 60
+
+
+def process_export_frames(
+    video, range_mode, start_time, end_time, every_n,
+    image_format, jpeg_quality, upscale, scale, make_zip,
+    output_folder=None, progress=gr.Progress(),
+):
+    """Export a video's frames as stills, optionally upscaling each one."""
+    if video is None:
+        return "No video uploaded.", [], None
+
+    def on_progress(done, total):
+        progress(done / total if total else 0, desc=f"Exporting frame {done}/{total}")
+
+    # Each run starts from an empty folder so a shorter range cannot leave
+    # stills from a previous, longer one behind.
+    try:
+        output_root = resolve_output_dir(output_folder, "video_frame_exports")
+    except OSError as exc:
+        return f"❌ {exc}", [], None
+
+    # Allow the root, not the per-video subfolder: the zip is written beside
+    # that subfolder, so allowing only the subfolder leaves the zip unservable.
+    allow_output_path(output_root)
+    output_dir = os.path.join(output_root, Path(video).stem)
+    clear_export_dir(output_dir)
+    reset_stop()
+
+    try:
+        result = export_frames(
+            video,
+            output_dir=output_dir,
+            range_mode=range_mode,
+            start_time=start_time,
+            end_time=end_time,
+            every_n=int(every_n),
+            image_format=image_format,
+            jpeg_quality=int(jpeg_quality),
+            upscale=bool(upscale),
+            scale_factor=float(scale),
+            make_zip=bool(make_zip),
+            progress_callback=on_progress,
+        )
+    except OperationCancelled:
+        # The frames written before the stop are real and stay on disk.
+        written = len([
+            n for n in os.listdir(output_dir)
+        ]) if os.path.isdir(output_dir) else 0
+        logger.info("Frame export stopped after %d frames", written)
+        return (
+            f"⏹️ Stopped. {written} frames were written to {output_dir}",
+            [], None,
+        )
+    except Exception as exc:  # noqa: BLE001 - report it in the UI
+        logger.error(f"Frame export failed: {exc}", exc_info=True)
+        return f"❌ {exc}", [], None
+
+    first, last = result["range"]
+    fps = result["fps"] or 1.0
+    report = (
+        f"✅ {result['frame_count']} frames exported in {result['elapsed']:.1f}s\n"
+        f"🎬 Source frames {first}-{last} ({first / fps:.2f}s - {last / fps:.2f}s)\n"
+        f"📐 {result['source_resolution'][0]}x{result['source_resolution'][1]}"
+        f" → {result['resolution'][0]}x{result['resolution'][1]}"
+    )
+    if result["upscaled"]:
+        report += f" (upscaled {result['scale_factor']}x)"
+    report += f"\n📁 {result['output_dir']}"
+
+    gallery = result["frames"][:GALLERY_PREVIEW_LIMIT]
+    if len(result["frames"]) > GALLERY_PREVIEW_LIMIT:
+        report += f"\n👁️ Showing the first {GALLERY_PREVIEW_LIMIT} of {result['frame_count']}"
+
+    return report, gallery, result["zip_path"]
+
+
+def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal,
+                       codec=DEFAULT_CODEC, crf=DEFAULT_CRF, measure_quality=False,
+                       output_folder=None, progress=gr.Progress()):
     """Process full video"""
     global current_upscaler
 
@@ -273,22 +522,15 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
         progress(0, desc="Initializing...")
 
         # Parse model name
-        if "Real-ESRGAN" in model:
-            model_name = "realesrgan"
-        elif "SwinIR" in model:
-            return None, "❌ SwinIR not yet implemented", []
-        elif "SeedVR2" in model:
-            return None, "❌ SeedVR2 not yet implemented", []
-        else:
-            model_name = "realesrgan"
+        model_name = parse_model_choice(model)
+        if model_name is None:
+            return None, f"❌ {model.split('(')[0].strip()} is not implemented yet", []
 
         # Create upscaler
         progress(0.05, desc="Loading AI model...")
         try:
-            upscaler = create_upscaler(
-                model_name=model_name,
-                scale_factor=float(scale),
-                device='auto'
+            upscaler = build_upscaler(
+                model_name, float(scale), codec=codec, crf=int(crf)
             )
         except ImportError as ie:
             if "Real-ESRGAN not available" in str(ie):
@@ -312,8 +554,15 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
         logger.info(f"Estimated processing time: {estimated_time}")
 
         # Create output path
-        output_dir = Path(tempfile.gettempdir()) / "video_upscaler_outputs"
-        output_dir.mkdir(exist_ok=True)
+        try:
+            output_dir = Path(
+                resolve_output_dir(output_folder, "video_upscaler_outputs")
+            )
+        except OSError as exc:
+            return None, f"❌ {exc}", [], None, None
+
+        allow_output_path(output_dir)
+        reset_stop()
 
         input_name = Path(video).stem
         output_path = str(output_dir / f"{input_name}_upscaled_{scale}x.mp4")
@@ -340,7 +589,8 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
             status += f"⏱️ Total time: {metrics['total_time']:.1f}s ({metrics['total_time']/60:.1f} min)\n"
             status += f"🎬 Frames: {metrics['frames_processed']:,}\n"
             status += f"📐 Resolution: {metrics['input_resolution']} → {metrics['output_resolution']}\n"
-            status += f"⚡ Speed: {metrics['avg_time_per_frame']:.3f}s per frame"
+            status += f"⚡ Speed: {metrics['avg_time_per_frame']:.3f}s per frame\n"
+            status += f"📁 Saved to: {output_dir}"
 
             # Metrics table
             metrics_data = [
@@ -352,18 +602,33 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
                 ["Avg Time/Frame", f"{metrics['avg_time_per_frame']:.3f}s"],
             ]
 
-            return output_path, status, metrics_data
+            # Quality metrics are sampled, but optical flow over a long clip
+            # still costs real time, so they are opt-in.
+            if measure_quality:
+                progress(0.97, desc="Measuring quality...")
+                try:
+                    quality = compare_videos(video, output_path)
+                    metrics_data.extend(format_metric_rows(quality))
+                except Exception as exc:  # noqa: BLE001 - never lose the video
+                    logger.error("Quality metrics failed: %s", exc, exc_info=True)
+                    metrics_data.append(["Quality metrics", f"failed: {exc}"])
+
+            return output_path, status, metrics_data, video, output_path
         else:
             error_msg = f"❌ Processing failed: {result.get('error', 'Unknown error')}"
-            return None, error_msg, []
+            return None, error_msg, [], None, None
 
+    except OperationCancelled:
+        logger.info("Processing stopped by the user")
+        return None, "⏹️ Stopped. The partial output was discarded.", [], None, None
     except Exception as e:
         logger.error(f"Error in full processing: {e}", exc_info=True)
-        return None, f"❌ Error: {str(e)}", []
+        return None, f"❌ Error: {str(e)}", [], None, None
 
 
 def create_interface():
     """Create the main Gradio interface"""
+    global _blocks
 
     with gr.Blocks(
         theme=gr.themes.Soft(),
@@ -395,8 +660,7 @@ def create_interface():
                     with gr.Column(scale=2):
                         # Video upload
                         video_input = gr.Video(
-                            label="📹 Video Source",
-                            format="mp4",
+                            label="📹 Video Source (mp4, webm, mkv, mov, avi)",
                             include_audio=True
                         )
 
@@ -413,11 +677,7 @@ def create_interface():
                             gr.Markdown("### ⚙️ Upscaling Settings")
 
                             spatial_model = gr.Dropdown(
-                                choices=[
-                                    "Real-ESRGAN (Fast, Excellent Quality)",
-                                    "SwinIR (Slow, Maximum Quality) - Coming Soon",
-                                    "SeedVR2 (Temporal Coherence, High VRAM) - Coming Soon"
-                                ],
+                                choices=list(SPATIAL_MODELS),
                                 label="AI Model",
                                 value="Real-ESRGAN (Fast, Excellent Quality)",
                                 info="Choose the model based on your needs and hardware"
@@ -452,6 +712,42 @@ def create_interface():
                                 interactive=False,
                                 placeholder="Will be calculated automatically"
                             )
+
+                        with gr.Group():
+                            gr.Markdown("### 💾 Output")
+
+                            output_codec = gr.Radio(
+                                choices=list(FFMPEG_CODECS) + ["mp4v"],
+                                value=DEFAULT_CODEC,
+                                label="Codec",
+                                info="h264 = compatible everywhere, h265 = smaller, mp4v = legacy fallback",
+                            )
+                            output_crf = gr.Slider(
+                                label="Quality (CRF)",
+                                minimum=0,
+                                maximum=51,
+                                step=1,
+                                value=DEFAULT_CRF,
+                                info="Lower = better and bigger. 18 is near-transparent, 23 the usual default.",
+                            )
+                            measure_quality = gr.Checkbox(
+                                label="📊 Measure quality after processing (PSNR / SSIM / stability)",
+                                value=False,
+                                info="Adds a pass over the result; see the Comparison tab",
+                            )
+                            process_output_folder = gr.Textbox(
+                                label="📁 Output folder",
+                                placeholder="Leave empty for the system temp folder",
+                                info="%TEMP% is cleaned up by Windows; set a folder to keep results",
+                            )
+
+
+                        # CRF means nothing to the OpenCV FourCC writer.
+                        output_codec.change(
+                            fn=lambda c: gr.update(visible=c in FFMPEG_CODECS),
+                            inputs=[output_codec],
+                            outputs=[output_crf],
+                        )
 
                         # Interpolation settings
                         with gr.Group():
@@ -515,6 +811,11 @@ def create_interface():
                         variant="primary",
                         size="lg"
                     )
+                    process_stop_btn = gr.Button(
+                        "⏹️ Stop",
+                        variant="stop",
+                        size="lg"
+                    )
 
                 # Status
                 status_text = gr.Textbox(
@@ -549,7 +850,176 @@ def create_interface():
                 )
 
             # ============================================================
-            # TAB 3: SETTINGS
+            # TAB 3: REVERSE
+            # ============================================================
+            with gr.Tab("🔁 Reverse"):
+                gr.Markdown("### Reverse Videos")
+                gr.Markdown(
+                    "*Reverse one or several videos frame by frame. "
+                    "Optionally keep the extracted frames, or join the original "
+                    "and reversed clips together.*"
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        reverse_input = gr.File(
+                            label="📂 Videos (mp4, webm, mkv, mov, avi)",
+                            file_count="multiple",
+                            file_types=["video"],
+                        )
+                        reverse_keep_frames = gr.Checkbox(
+                            label="🗂️ Keep extracted frames",
+                            value=False,
+                        )
+                        reverse_combine = gr.Radio(
+                            choices=list(COMBINE_MODES),
+                            value="none",
+                            label="🔁 Combine original and reversed",
+                            info="none = reversed only, ab = original then reversed, ba = reversed then original",
+                        )
+                        reverse_output_folder = gr.Textbox(
+                            label="📁 Output folder",
+                            placeholder="Leave empty for the system temp folder",
+                            info="%TEMP% is cleaned up by Windows; set a folder to keep results",
+                        )
+
+                        with gr.Row():
+                            reverse_clear_btn = gr.Button("Clear")
+                            reverse_btn = gr.Button("🔁 Reverse", variant="primary")
+                            reverse_stop_btn = gr.Button("⏹️ Stop", variant="stop")
+                        reverse_original = gr.Video(label="📼 Original", interactive=False)
+
+                    with gr.Column(scale=1):
+                        reverse_status = gr.Textbox(
+                            label="🔁 Status",
+                            interactive=False,
+                            lines=6,
+                            placeholder="Upload one or more videos and press Reverse...",
+                        )
+                        reverse_output = gr.Video(label="🎥 Reversed", interactive=False)
+                        reverse_combined = gr.Video(label="🔗 Combined", interactive=False)
+                        reverse_frames = gr.Gallery(
+                            label="🖼️ Extracted frames",
+                            columns=6,
+                            object_fit="contain",
+                        )
+
+            # ============================================================
+            # TAB 4: EXPORT FRAMES
+            # ============================================================
+            with gr.Tab("🖼️ Export Frames"):
+                gr.Markdown("### Export Frames")
+                gr.Markdown(
+                    "*Write a video's frames out as still images, over the whole "
+                    "clip or a chosen span, optionally upscaling each one.*"
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        export_input = gr.Video(
+                            label="📹 Video Source (mp4, webm, mkv, mov, avi)",
+                        )
+
+                        with gr.Group():
+                            gr.Markdown("### ⏱️ Range")
+                            export_range_mode = gr.Radio(
+                                choices=[
+                                    ("Whole video", "all"),
+                                    ("From a start time", "from"),
+                                    ("Up to an end time", "to"),
+                                    ("Between two times", "range"),
+                                ],
+                                value="all",
+                                label="Which frames to export",
+                            )
+                            with gr.Row():
+                                export_start = gr.Number(
+                                    label="Start (seconds)",
+                                    value=0,
+                                    minimum=0,
+                                    visible=False,
+                                )
+                                export_end = gr.Number(
+                                    label="End (seconds)",
+                                    value=5,
+                                    minimum=0,
+                                    visible=False,
+                                )
+                            export_every_n = gr.Slider(
+                                label="Keep one frame out of",
+                                minimum=1,
+                                maximum=60,
+                                step=1,
+                                value=1,
+                                info="1 = every frame. Raise it to thin out a long export.",
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("### 🖼️ Output")
+                            export_format = gr.Radio(
+                                choices=list(IMAGE_FORMATS),
+                                value="png",
+                                label="Image format",
+                                info="png = lossless, jpg = much smaller",
+                            )
+                            export_quality = gr.Slider(
+                                label="JPEG quality",
+                                minimum=50,
+                                maximum=100,
+                                step=1,
+                                value=95,
+                                visible=False,
+                            )
+                            export_zip = gr.Checkbox(
+                                label="📦 Also bundle the frames into a zip",
+                                value=True,
+                            )
+                            export_output_folder = gr.Textbox(
+                                label="📁 Output folder",
+                                placeholder="Leave empty for the system temp folder",
+                                info="%TEMP% is cleaned up by Windows; set a folder to keep results",
+                            )
+
+
+                        with gr.Group():
+                            gr.Markdown("### ⚙️ Upscaling")
+                            export_upscale = gr.Checkbox(
+                                label="✨ Upscale each frame",
+                                value=False,
+                            )
+                            export_scale = gr.Slider(
+                                label="Scale factor",
+                                minimum=0.5,
+                                maximum=8.0,
+                                step=0.1,
+                                value=2.0,
+                                visible=False,
+                                info="<1.0 = Downscale, 2.0/4.0 = Optimal AI, Other = Hybrid (AI+Resize)",
+                            )
+
+                        with gr.Row():
+                            export_btn = gr.Button("🖼️ Export Frames", variant="primary")
+                            export_stop_btn = gr.Button("⏹️ Stop", variant="stop")
+
+                    with gr.Column(scale=1):
+                        export_status = gr.Textbox(
+                            label="🖼️ Status",
+                            interactive=False,
+                            lines=6,
+                            placeholder="Upload a video, pick a range and press Export...",
+                        )
+                        export_zip_file = gr.File(
+                            label="📦 Frames archive",
+                            interactive=False,
+                        )
+                        export_gallery = gr.Gallery(
+                            label="🖼️ Exported frames",
+                            columns=6,
+                            object_fit="contain",
+                        )
+
+            # ============================================================
+            # TAB 5: SETTINGS
             # ============================================================
             with gr.Tab("⚙️ Advanced Settings"):
                 gr.Markdown("### Advanced Configuration")
@@ -561,7 +1031,6 @@ def create_interface():
                     temporal_method = gr.Radio(
                         choices=[
                             "Auto (Recommended)",
-                            "SeedVR2",
                             "Optical Flow",
                             "EMA Filter"
                         ],
@@ -624,6 +1093,81 @@ def create_interface():
         # EVENT HANDLERS
         # ============================================================
 
+        # Export Frames tab: only show the inputs the chosen options need.
+        def _toggle_range_inputs(mode):
+            return (
+                gr.update(visible=mode in ("from", "range")),
+                gr.update(visible=mode in ("to", "range")),
+            )
+
+        export_range_mode.change(
+            fn=_toggle_range_inputs,
+            inputs=[export_range_mode],
+            outputs=[export_start, export_end],
+        )
+
+        export_format.change(
+            fn=lambda fmt: gr.update(visible=fmt == "jpg"),
+            inputs=[export_format],
+            outputs=[export_quality],
+        )
+
+        export_upscale.change(
+            fn=lambda enabled: gr.update(visible=bool(enabled)),
+            inputs=[export_upscale],
+            outputs=[export_scale],
+        )
+
+        export_event = export_btn.click(
+            fn=process_export_frames,
+            inputs=[
+                export_input,
+                export_range_mode,
+                export_start,
+                export_end,
+                export_every_n,
+                export_format,
+                export_quality,
+                export_upscale,
+                export_scale,
+                export_zip,
+                export_output_folder,
+            ],
+            outputs=[export_status, export_gallery, export_zip_file],
+        )
+
+        # Reverse tab
+        reverse_event = reverse_btn.click(
+            fn=process_reverse,
+            inputs=[
+                reverse_input,
+                reverse_keep_frames,
+                reverse_combine,
+                reverse_output_folder,
+            ],
+            outputs=[
+                reverse_status,
+                reverse_original,
+                reverse_output,
+                reverse_combined,
+                reverse_frames,
+            ],
+        )
+
+        reverse_clear_btn.click(
+            fn=lambda: ("", None, None, None, [], None, False, "none"),
+            outputs=[
+                reverse_status,
+                reverse_original,
+                reverse_output,
+                reverse_combined,
+                reverse_frames,
+                reverse_input,
+                reverse_keep_frames,
+                reverse_combine,
+            ],
+        )
+
         # Video upload
         video_input.change(
             fn=on_video_upload,
@@ -653,7 +1197,7 @@ def create_interface():
         )
 
         # Preview button
-        preview_btn.click(
+        preview_event = preview_btn.click(
             fn=process_preview,
             inputs=[
                 video_input,
@@ -667,7 +1211,7 @@ def create_interface():
         )
 
         # Process button
-        process_btn.click(
+        process_event = process_btn.click(
             fn=process_full_video,
             inputs=[
                 video_input,
@@ -676,9 +1220,44 @@ def create_interface():
                 enable_interpolation,
                 interpolation_model,
                 fps_multiplier,
-                temporal_method
+                temporal_method,
+                output_codec,
+                output_crf,
+                measure_quality,
+                process_output_folder
             ],
-            outputs=[video_output, status_text, metrics_display]
+            outputs=[
+                video_output,
+                status_text,
+                metrics_display,
+                original_video,
+                processed_video
+            ]
+        )
+
+        # Stop buttons.
+        #
+        # queue=False matters: with the default queue the click would wait
+        # behind the job it is meant to interrupt, so the button would do
+        # nothing until the work had already finished.
+        #
+        # cancels= drops the Gradio event so the spinner stops, but it cannot
+        # kill the thread doing the work - that is what request_stop is for.
+        # Both are needed: one stops the UI waiting, the other stops the GPU.
+        process_stop_btn.click(
+            fn=request_stop,
+            cancels=[process_event, preview_event],
+            queue=False,
+        )
+        export_stop_btn.click(
+            fn=request_stop,
+            cancels=[export_event],
+            queue=False,
+        )
+        reverse_stop_btn.click(
+            fn=request_stop,
+            cancels=[reverse_event],
+            queue=False,
         )
 
         # Refresh system info
@@ -687,6 +1266,7 @@ def create_interface():
             outputs=[system_info]
         )
 
+    _blocks = app
     return app
 
 

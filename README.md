@@ -12,6 +12,9 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 
 ## ✨ Features
 
+- **Reverse videos** frame by frame, in batch, from the UI or the CLI
+- **Export frames** as PNG/JPEG over any time range, optionally upscaled
+
 ### Currently Working (v0.2.0)
 
 - **🚀 Real-ESRGAN Upscaling** ✅
@@ -45,30 +48,71 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
   - System information display
   - Before/after comparison
 
+- **🔬 SwinIR Upscaling** ✅
+  - Transformer-based, slower than Real-ESRGAN but more detailed
+  - Standard and Large variants
+
+- **🎞️ BasicVSR++ Upscaling** ✅
+  - Reads a run of frames instead of one at a time, for temporal coherence
+  - 4× native
+
+- **📊 Quality Metrics** ✅
+  - PSNR, SSIM and motion-compensated temporal stability
+- **💾 H.264 / H.265 output** ✅
+  - CRF quality control, replacing the old mp4v encoder
+
 ### Coming Soon
 
-- **SwinIR**: Maximum quality upscaling
-- **SeedVR2**: Temporal coherence for flicker-free results
-- **DAIN**: Advanced frame interpolation
-- **Quality Metrics**: PSNR, SSIM, flickering scores
+- **RIFE / DAIN**: frame interpolation
+- **Resume**: pick a long job back up after an interruption
+- **Queue**: batch several videos in the Processing tab
 - **Batch Processing**: Process multiple videos at once
 
 ## 📋 Requirements
 
 ### Minimum Requirements (CPU Mode)
-- **Python 3.10, 3.11, or 3.12 (RECOMMENDED)** ⚠️ Python 3.13 has compatibility issues
+- **Python 3.10, 3.11 or 3.12** (a final release, not an alpha/beta/rc)
 - 32 GB RAM
 - Intel i7 / AMD Ryzen 7 or better (8+ cores)
 - 50 GB free disk space
 
 ### Recommended Requirements (GPU Mode)
-- **Python 3.10, 3.11, or 3.12 (RECOMMENDED)** ⚠️ Python 3.13 has compatibility issues
+- **Python 3.10, 3.11 or 3.12** (a final release, not an alpha/beta/rc)
 - 16 GB RAM (32 GB recommended)
 - NVIDIA GPU with 12+ GB VRAM (RTX 3060 or better)
 - 50 GB free disk space
-- CUDA 11.8 or higher (for NVIDIA GPU acceleration)
+- An NVIDIA driver recent enough for the CUDA build the installer picks
 
-**⚠️ Python 3.13 Compatibility**: Python 3.13 has known issues with AI model dependencies (BasicSR). Please use Python 3.10-3.12 for the best experience. If you must use Python 3.13, see [PYTHON_313_WORKAROUND.md](PYTHON_313_WORKAROUND.md) for manual installation instructions.
+### Python version
+
+The installer probes `py -3.12`, `py -3.11`, `py -3.10` and then `python`, and
+uses the first one that passes `scripts/check_python.py`. It deliberately skips:
+
+- **Python 3.13+** - BasicSR needs `numpy < 2`, which has no wheels for 3.13
+  (details in [PYTHON_313_WORKAROUND.md](PYTHON_313_WORKAROUND.md)).
+- **Pre-releases** - for example 3.12.0b3, whose `re` module makes any modern
+  pip crash with `InvalidVersion: Invalid version: '0.dev0'`.
+- **MSYS2 / MinGW Python** - it cannot install the official PyTorch wheels.
+
+If none of your interpreters qualify, the installer prints which ones it
+rejected and why. Install Python 3.12 from
+[python.org](https://www.python.org/downloads/release/python-31210/) and tick
+"Add Python to PATH".
+
+### CUDA build
+
+`scripts/detect_cuda.py` reads the GPU's compute capability and picks the
+matching PyTorch wheel index:
+
+| GPU | Wheels |
+|-----|--------|
+| Blackwell / RTX 50xx (sm_120) | `cu128` |
+| Hopper and older (sm_90 and below) | `cu124` |
+| No NVIDIA GPU | CPU wheels |
+
+This matters: the `cu124` wheels carry no kernels above sm_90, so on an RTX 50xx
+they install cleanly and then refuse to run with *"sm_120 is not compatible with
+the current PyTorch installation"*.
 
 ### Supported Platforms
 - ✅ Windows 10/11
@@ -157,20 +201,27 @@ brew install ffmpeg
 If the automatic installer doesn't work, you can install manually:
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
+# Create the virtual environment with a supported interpreter
+py -3.12 -m venv venv          # Windows
+python3.12 -m venv venv        # Linux/macOS
 
-# Activate virtual environment
-# On Windows:
-venv\Scripts\activate.bat
-# On Linux/macOS:
-source venv/bin/activate
+# Call the venv interpreter directly, so a failed activation cannot
+# silently install into the system Python instead
+venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
 
-# Upgrade pip
-pip install --upgrade pip
+# Install PyTorch for your GPU FIRST (cu128 for RTX 50xx, cu124 otherwise)
+venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
-# Install dependencies
-pip install -r requirements.txt
+# Then everything else
+venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# basicsr only ships an sdist whose setup.py imports torch, so it has to be
+# built against the venv rather than pip's isolated build environment
+venv\Scripts\python.exe -m pip install --no-build-isolation basicsr realesrgan
+venv\Scripts\python.exe scripts\patch_basicsr.py
+
+# Check the result
+venv\Scripts\python.exe scripts\verify_install.py
 ```
 
 ## 🎮 Usage
@@ -201,7 +252,59 @@ pip install -r requirements.txt
 |-------|----------|-------|------|---------|
 | **Real-ESRGAN** | General use, realistic videos | Fast | 4-8 GB | Excellent |
 | **SwinIR** | Photo-realistic, detailed content | Slow | 6-10 GB | Maximum |
-| **SeedVR2** | Videos with temporal artifacts | Medium | 16-24 GB | Excellent + Coherence |
+| **SwinIR Large** | Stills and short clips | Slowest | 10-16 GB | Highest |
+| **BasicVSR++** | Footage that flickers between frames | Medium | 8-16 GB | Excellent + Coherence |
+
+**Notes on BasicVSR++.** The other models see one frame at a time, so each
+frame is upscaled independently and small differences between them show up as
+flicker. BasicVSR++ propagates information along the sequence in both
+directions and aligns neighbouring frames with optical flow, which is what
+removes that flicker. It replaces SeedVR2, which was listed here but never
+implemented: there is no pip package for it, it needs a cloned repo, 3B-7B
+weights and a diffusion stack. BasicVSR++ reaches the same goal with 7M
+parameters and a 29 MB checkpoint, and its architecture is already in
+`basicsr`.
+
+It is a **4× model** — there is no 2× checkpoint, so other factors are reached
+by resizing its output.
+
+Because it works on runs of frames, it goes through `TemporalUpscaler` rather
+than `SpatialUpscaler`, which feeds the video in overlapping windows sized from
+the available VRAM. The overlap is not cosmetic: a frame at the edge of a
+window has little propagated context, so too small an overlap leaves a visible
+seam every window. Measured at window=16, the motion-compensated residual at
+the seams against everywhere else was 10.4× at overlap=2 and 0.4× at
+overlap=4, so the default overlap has a floor of 4 frames.
+
+**Honest caveat.** The implementation is verified — weights load strictly, no
+frame falls back, windows reassemble exactly — but the temporal-coherence
+*benefit* was not demonstrated here. On the synthetic clips used for testing,
+Real-ESRGAN is already almost perfectly stable (motion-compensated residual
+0.029) and BasicVSR++ scored higher, not lower. Those clips are test patterns
+with little real motion and no realistic grain, which is the wrong material
+for this: the published checkpoint is trained on real video (REDS). Judge it on
+your own footage, with the kind of noise and compression that actually makes a
+per-frame upscaler flicker.
+
+**Notes on SwinIR.** The architecture comes from the installed `basicsr`, so
+only the weights are downloaded (64 MB for x4, 142 MB for Large).
+
+It always runs in **fp32**, whatever the global half-precision setting says:
+its attention overflows the fp16 range and the network returns all-NaN, which
+does not raise — it just yields a corrupted frame. bfloat16 is numerically
+correct but measured roughly 15× slower than fp32 here, so it is not used
+either.
+
+At **x4** it uses the real-world SR checkpoint, trained on realistic
+degradations. At **x2** it uses the *classical* SR checkpoint, because the
+official x2 real-world weights were trained with an upsampler (`nearest+conv`)
+that `basicsr` only implements at x4. Classical SR is trained on clean bicubic
+downscaling, so x2 is sharper on clean sources and less forgiving of
+compression artefacts than x4. For noisy or heavily compressed footage, x4 is
+the better model even if you then scale back down.
+
+SwinIR tiles by default, sized from the available VRAM, because it needs far
+more memory than Real-ESRGAN at the same resolution.
 
 ### FPS Interpolation
 
@@ -244,6 +347,170 @@ Available test video types:
 - `resolution`: Resolution test pattern (tests sharpness)
 - `all`: Generate all test videos
 
+### 🔁 Reverse (tab)
+
+Reverses videos frame by frame, merged in from
+[ReverseVideo](https://github.com/mikecastrodemaria/ReverseVideo).
+
+1. Drop one or several videos onto **Videos** (batch is supported).
+2. Tick **Keep extracted frames** to also get every frame as a JPEG, shown in
+   the gallery under the previews.
+3. Pick a **Combine** mode: `none` for the reversed clip only, `ab` for original
+   then reversed, `ba` for reversed then original.
+4. Press **Reverse**. The original, the reversed clip and the combined clip are
+   previewed side by side, and the status box reports each file separately - one
+   bad file does not abort the batch.
+
+Frames are spooled to a temporary directory as lossless PNG rather than held in
+memory, so a long or high-resolution video does not depend on free RAM.
+
+### 🖼️ Export Frames (tab)
+
+Writes a video's frames out as still images, with each frame named after its
+index in the source so an export can always be traced back.
+
+**Range** — pick one of:
+
+| Mode | Exports |
+|------|---------|
+| Whole video | every frame |
+| From a start time | from *start* to the end |
+| Up to an end time | from the beginning to *end* |
+| Between two times | *start* to *end* |
+
+An end past the end of the clip is clamped rather than refused. A start past it
+is an error, as is an empty range.
+
+**Keep one frame out of N** thins a long export out: a 10-minute 30 fps clip is
+18 000 stills at N=1.
+
+**Output** — PNG (lossless) or JPEG with a quality slider, and optionally a zip
+of the whole set for a single download. The gallery previews the first 60; the
+folder and the zip hold them all.
+
+**Upscaling** — tick *Upscale each frame* to run every still through the same
+Real-ESRGAN path as the video upscaler, at any factor from 0.5× (downscale) to
+8×. 2× and 4× go straight through the AI model; other factors are hybrid.
+
+### Command line
+
+Reversing and frame export both work without the browser:
+
+```bash
+# Reverse one video
+python app.py --reverse clip.webm
+
+# A batch, keeping the frames, with the original and reversed joined
+python app.py --reverse a.mp4 b.webm --keep-frames --video-loop ab --output-dir out/
+
+# Every frame of a clip as PNG
+python app.py --export-frames clip.webm
+
+# One frame in 3 between 10s and 25s, as JPEG, upscaled 2x, zipped
+python app.py --export-frames clip.mp4 --start 10 --end 25 --every 3 \
+    --format jpg --upscale 2 --zip --output-dir frames/
+
+# Start the web UI on another port, without opening a browser
+python app.py --port 8000 --no-browser
+```
+
+The range mode follows from which bounds you pass: `--start` alone means "from
+there to the end", `--end` alone means "up to there", both means "between",
+neither means the whole video.
+
+`python app.py --help` lists every option. The exit code is non-zero if any
+input failed.
+
+### 📁 Output folder
+
+The **Processing**, **Export Frames** and **Reverse** tabs each have an *Output
+folder* box. Leave it empty and results go where they always did, under the
+system temp folder:
+
+| Action | Default |
+|--------|---------|
+| Upscale | `%TEMP%\video_upscaler_outputs\` |
+| Export frames | `%TEMP%\video_frame_exports\<video name>\` |
+| Reverse | `%TEMP%\video_reverser_outputs\` |
+| Model weights | `%LOCALAPPDATA%\video-upscaler-pro\models\` |
+
+Windows cleans `%TEMP%` out on its own, so set a folder for anything you want
+to keep. The field accepts `~/Videos`, `%USERPROFILE%\Videos`, a path in
+quotes, and relative paths (resolved against where the app was started). The
+folder is created if missing, and checked for writability *before* a long job
+starts rather than failing partway through; if it cannot be used, the tab says
+why and nothing runs.
+
+The destination is printed in the status box after each run, and the CLI has
+`--output-dir` for `--reverse` and `--export-frames`.
+
+Gradio only serves files from the working directory and the system temp
+folder, so a folder outside those is added to its allowed paths when you pick
+it. That folder is then readable by anything that can reach the app, which is
+why the UI binds to `127.0.0.1` (this machine only). `--host 0.0.0.0` opens it
+to your network; the app warns when you do.
+
+### ⏹️ Stopping a job
+
+Each of the Processing, Export Frames and Reverse tabs has a **Stop** button.
+
+Gradio can drop the event it is waiting on, but it cannot kill the thread
+already doing the work, so stopping is cooperative: the loops check a flag
+between frames and raise. The button does both — drops the event so the
+spinner stops, and sets the flag so the GPU actually stops.
+
+It takes effect at the next frame boundary, so the delay is one frame: a
+fraction of a second at SD, a few seconds for a 4K frame with many tiles.
+
+What already exists is kept. A stopped frame export leaves the stills it had
+written and tells you how many; a stopped upscale discards the partial video,
+since half a file is of no use.
+
+### 💾 Output codec
+
+Under **Output** in the Processing tab:
+
+| Codec | Use |
+|-------|-----|
+| `h264` (default) | plays everywhere |
+| `h265` | roughly half the size at the same quality, less universally supported |
+| `mp4v` | legacy fallback, only when ffmpeg is unavailable |
+
+`mp4v` (MPEG-4 Part 2) used to be the only option and is a poor one at high
+resolutions — no modern rate control, large files, visible blocking. On a short
+640×480 test clip h264 came out 1.8× smaller than mp4v; the gap widens sharply
+at 4K.
+
+**CRF** sets quality for the ffmpeg encoders: lower is better and bigger, 18 is
+near-transparent, 23 is the usual default, above ~28 artefacts show. It does
+nothing for `mp4v`, so the slider hides itself.
+
+Frames are piped straight to ffmpeg rather than written through OpenCV, and odd
+output dimensions — which an arbitrary scale factor easily produces — are
+rounded down to even, since H.264/H.265 need that for `yuv420p`.
+
+### 📊 Quality metrics
+
+Tick **Measure quality after processing** in the Processing tab; the results
+land in the **Comparison** tab, which also now shows the source and the result
+side by side.
+
+| Metric | Means |
+|--------|-------|
+| PSNR / SSIM (round-trip) | the result scaled back down, compared with the source. Higher means the upscale stayed faithful rather than inventing detail. |
+| PSNR vs plain resize | distance from simply enlarging with Lanczos. Near-identical values mean the model did little a resize would not have. |
+| Temporal stability | flicker between consecutive frames with motion removed by optical flow. Lower is steadier. |
+
+There is no ground truth at the higher resolution for real footage, so these
+are round-trip and relative measures, not absolute scores. Metrics are sampled
+over 24 frames, not the whole video, and are off by default because the optical
+flow pass costs real time.
+
+The stability figure is reported as an absolute difference rather than a
+percentage when the source barely moves: a near-static clip has a baseline
+around 0.003, against which any result becomes a meaningless four-digit
+percentage.
+
 ## ⚙️ Configuration
 
 ### Advanced Settings
@@ -283,9 +550,25 @@ output_quality: 18  # CRF value
 
 #### "ModuleNotFoundError"
 **Solution**:
+- Get a full report of what is and is not installed:
+  `venv\Scripts\python.exe scripts\verify_install.py`
 - Run the installer again: `install.bat` or `./install.sh`
-- Ensure virtual environment is activated
-- Check Python version: `python --version` (must be 3.10+)
+
+#### "sm_120 is not compatible with the current PyTorch installation"
+PyTorch was built for older GPUs than the one you have - typically an RTX 50xx
+with `cu124` wheels. Re-run `install.bat`: it picks the CUDA build from the
+GPU's compute capability.
+
+#### "InvalidVersion: Invalid version: '0.dev0'" during installation
+The venv was built with a pre-release Python such as 3.12.0b3, whose `re` module
+breaks modern pip. Re-run `install.bat`: it skips pre-releases and prints which
+interpreter it chose.
+
+#### Real-ESRGAN unavailable / upscaling falls back to interpolation
+`import basicsr` fails because basicsr 1.4.2 imports
+`torchvision.transforms.functional_tensor`, which torchvision removed in 0.17.
+Run `venv\Scripts\python.exe scripts\patch_basicsr.py` to repoint it at the
+public `torchvision.transforms.functional`.
 
 #### Application won't start
 **Solution**:

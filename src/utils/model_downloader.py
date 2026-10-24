@@ -30,6 +30,35 @@ MODEL_URLS = {
         'filename': 'RealESRGAN_x4plus_anime_6B.pth',
         'md5': None,
     },
+    # SwinIR real-world SR checkpoints. The architecture itself comes from
+    # basicsr; only these weights are downloaded. The hyper-parameters each one
+    # expects are in src/models/swinir_model.py (MODEL_CONFIGS).
+    # Classical SR rather than real-world SR: the x2 real-world checkpoint uses
+    # an upsampler basicsr only implements at x4. See MODEL_CONFIGS in
+    # src/models/swinir_model.py.
+    'swinir_x2': {
+        'url': 'https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth',
+        'filename': '001_classicalSR_DF2K_s64w8_SwinIR-M_x2.pth',
+        'md5': None,
+    },
+    'swinir_x4': {
+        'url': 'https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth',
+        'filename': '003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth',
+        'md5': None,
+    },
+    'swinir_x4_large': {
+        'url': 'https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth',
+        'filename': '003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth',
+        'md5': None,
+    },
+    # BasicVSR++ for temporal coherence. The architecture is in basicsr, but
+    # these weights are published by mmediting and use its module names;
+    # remap_state_dict in src/models/basicvsrpp_model.py translates them.
+    'basicvsrpp_reds': {
+        'url': 'https://download.openmmlab.com/mmediting/restorers/basicvsr_plusplus/basicvsr_plusplus_c64n7_8x1_600k_reds4_20210217-db622b2f.pth',
+        'filename': 'basicvsr_plusplus_c64n7_8x1_600k_reds4.pth',
+        'md5': None,
+    },
 }
 
 

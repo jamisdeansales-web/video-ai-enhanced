@@ -1,0 +1,7 @@
+# Keep line endings correct per platform: CRLF scripts fail on Linux/macOS with
+# "bad interpreter: /bin/bash^M", and LF-only .bat files can confuse cmd.exe.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
