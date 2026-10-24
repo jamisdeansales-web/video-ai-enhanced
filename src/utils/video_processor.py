@@ -16,6 +16,28 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# Containers OpenCV's FFmpeg backend decodes for us. WebM (VP8/VP9) reads
+# natively, so uploads do not need transcoding before processing.
+SUPPORTED_INPUT_EXTENSIONS = (
+    '.mp4',
+    '.webm',
+    '.mkv',
+    '.mov',
+    '.avi',
+    '.m4v',
+    '.mpg',
+    '.mpeg',
+    '.wmv',
+    '.flv',
+    '.ts',
+)
+
+
+def is_supported_input(video_path: str) -> bool:
+    """Whether the file extension is one we expect to be able to decode."""
+    return Path(video_path).suffix.lower() in SUPPORTED_INPUT_EXTENSIONS
+
+
 class VideoProcessor:
     """Handle video processing operations"""
 
@@ -37,7 +59,12 @@ class VideoProcessor:
         self.cap = cv2.VideoCapture(video_path)
 
         if not self.cap.isOpened():
-            raise ValueError(f"Cannot open video file: {video_path}")
+            extension = Path(video_path).suffix.lower() or '(none)'
+            raise ValueError(
+                f"Cannot open video file: {video_path}\n"
+                f"Format {extension} could not be decoded. "
+                f"Supported formats: {', '.join(SUPPORTED_INPUT_EXTENSIONS)}"
+            )
 
         self._metadata = self._extract_metadata()
 
@@ -56,10 +83,22 @@ class VideoProcessor:
             'codec': int(self.cap.get(cv2.CAP_PROP_FOURCC)),
         }
 
+        metadata['codec_name'] = self._fourcc_to_name(metadata['codec'])
+        metadata['container'] = Path(self.video_path).suffix.lower().lstrip('.')
+
         metadata['duration'] = metadata['frame_count'] / metadata['fps'] if metadata['fps'] > 0 else 0
         metadata['resolution'] = (metadata['width'], metadata['height'])
 
         return metadata
+
+    @staticmethod
+    def _fourcc_to_name(fourcc: int) -> str:
+        """Decode a FOURCC integer into its four-character name, e.g. VP90."""
+        if not fourcc:
+            return 'unknown'
+        name = ''.join(chr((fourcc >> (8 * i)) & 0xFF) for i in range(4))
+        name = ''.join(c for c in name if c.isprintable()).strip()
+        return name or 'unknown'
 
     def get_metadata(self) -> Dict:
         """

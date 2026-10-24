@@ -22,6 +22,7 @@ from utils.system_manager import get_system_manager
 from utils.video_processor import VideoProcessor, format_duration
 from processors.spatial_upscaler import create_upscaler
 from processors.temporal_interpolator import create_interpolator
+from processors.video_reverser import COMBINE_MODES, reverse_batch
 
 # Global state
 current_upscaler = None
@@ -52,7 +53,8 @@ def on_video_upload(video):
         info = f"📹 Resolution: {metadata['width']}x{metadata['height']}\n"
         info += f"🎞️ FPS: {metadata['fps']:.2f}\n"
         info += f"⏱️ Duration: {format_duration(metadata['duration'])}\n"
-        info += f"🎬 Frames: {metadata['frame_count']:,}"
+        info += f"🎬 Frames: {metadata['frame_count']:,}\n"
+        info += f"📦 Format: {metadata['container']} ({metadata['codec_name']})"
 
         # Default output resolution (4x)
         output_res = f"{metadata['width']*4}x{metadata['height']*4} (4K)"
@@ -262,6 +264,65 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
         return None, f"❌ Error: {str(e)}"
 
 
+def process_reverse(files, keep_frames, combine_mode, progress=gr.Progress()):
+    """
+    Reverse one or more uploaded videos.
+
+    Returns the status report, the first input as the original preview, the last
+    reversed clip, the combined clip when one was produced, and every kept frame
+    for the gallery.
+    """
+    if not files:
+        return "No video selected.", None, None, None, []
+
+    # gr.File hands back either paths or objects carrying one, depending on the
+    # component's type; accept both so the tab works either way.
+    paths = [getattr(f, "name", f) for f in files]
+
+    def on_progress(index, total, name):
+        progress((index - 1) / total, desc=f"Reversing {name} ({index}/{total})")
+
+    results = reverse_batch(
+        paths,
+        combine_mode=combine_mode,
+        keep_frames=keep_frames,
+        progress_callback=on_progress,
+    )
+
+    succeeded = [r for r in results if r.get("success")]
+    failed = [r for r in results if not r.get("success")]
+
+    lines = []
+    for result in results:
+        name = os.path.basename(result.get("input_path", "?"))
+        if result.get("success"):
+            detail = f"{result['frame_count']} frames in {result['elapsed']:.1f}s"
+            if result.get("combined_path"):
+                detail += f", combined ({combine_mode})"
+            lines.append(f"✅ {name}: {detail}")
+        else:
+            lines.append(f"❌ {name}: {result.get('error', 'unknown error')}")
+
+    summary = f"{len(succeeded)}/{len(results)} reversed"
+    if failed:
+        summary += f", {len(failed)} failed"
+    report = summary + "\n\n" + "\n".join(lines)
+
+    if not succeeded:
+        return report, None, None, None, []
+
+    last = succeeded[-1]
+    gallery = [frame for r in succeeded for frame in r.get("frames", [])]
+
+    return (
+        report,
+        last.get("input_path"),
+        last.get("output_path"),
+        last.get("combined_path"),
+        gallery,
+    )
+
+
 def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal, progress=gr.Progress()):
     """Process full video"""
     global current_upscaler
@@ -395,8 +456,7 @@ def create_interface():
                     with gr.Column(scale=2):
                         # Video upload
                         video_input = gr.Video(
-                            label="📹 Video Source",
-                            format="mp4",
+                            label="📹 Video Source (mp4, webm, mkv, mov, avi)",
                             include_audio=True
                         )
 
@@ -549,7 +609,55 @@ def create_interface():
                 )
 
             # ============================================================
-            # TAB 3: SETTINGS
+            # TAB 3: REVERSE
+            # ============================================================
+            with gr.Tab("🔁 Reverse"):
+                gr.Markdown("### Reverse Videos")
+                gr.Markdown(
+                    "*Reverse one or several videos frame by frame. "
+                    "Optionally keep the extracted frames, or join the original "
+                    "and reversed clips together.*"
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        reverse_input = gr.File(
+                            label="📂 Videos (mp4, webm, mkv, mov, avi)",
+                            file_count="multiple",
+                            file_types=["video"],
+                        )
+                        reverse_keep_frames = gr.Checkbox(
+                            label="🗂️ Keep extracted frames",
+                            value=False,
+                        )
+                        reverse_combine = gr.Radio(
+                            choices=list(COMBINE_MODES),
+                            value="none",
+                            label="🔁 Combine original and reversed",
+                            info="none = reversed only, ab = original then reversed, ba = reversed then original",
+                        )
+                        with gr.Row():
+                            reverse_clear_btn = gr.Button("Clear")
+                            reverse_btn = gr.Button("🔁 Reverse", variant="primary")
+                        reverse_original = gr.Video(label="📼 Original", interactive=False)
+
+                    with gr.Column(scale=1):
+                        reverse_status = gr.Textbox(
+                            label="🔁 Status",
+                            interactive=False,
+                            lines=6,
+                            placeholder="Upload one or more videos and press Reverse...",
+                        )
+                        reverse_output = gr.Video(label="🎥 Reversed", interactive=False)
+                        reverse_combined = gr.Video(label="🔗 Combined", interactive=False)
+                        reverse_frames = gr.Gallery(
+                            label="🖼️ Extracted frames",
+                            columns=6,
+                            object_fit="contain",
+                        )
+
+            # ============================================================
+            # TAB 4: SETTINGS
             # ============================================================
             with gr.Tab("⚙️ Advanced Settings"):
                 gr.Markdown("### Advanced Configuration")
@@ -623,6 +731,33 @@ def create_interface():
         # ============================================================
         # EVENT HANDLERS
         # ============================================================
+
+        # Reverse tab
+        reverse_btn.click(
+            fn=process_reverse,
+            inputs=[reverse_input, reverse_keep_frames, reverse_combine],
+            outputs=[
+                reverse_status,
+                reverse_original,
+                reverse_output,
+                reverse_combined,
+                reverse_frames,
+            ],
+        )
+
+        reverse_clear_btn.click(
+            fn=lambda: ("", None, None, None, [], None, False, "none"),
+            outputs=[
+                reverse_status,
+                reverse_original,
+                reverse_output,
+                reverse_combined,
+                reverse_frames,
+                reverse_input,
+                reverse_keep_frames,
+                reverse_combine,
+            ],
+        )
 
         # Video upload
         video_input.change(

@@ -12,6 +12,8 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 
 ## ✨ Features
 
+- **Reverse videos** frame by frame, in batch, from the UI or the CLI
+
 ### Currently Working (v0.2.0)
 
 - **🚀 Real-ESRGAN Upscaling** ✅
@@ -279,6 +281,41 @@ Available test video types:
 - `bars`: Color bars with animation (tests color accuracy)
 - `resolution`: Resolution test pattern (tests sharpness)
 - `all`: Generate all test videos
+
+### 🔁 Reverse (tab)
+
+Reverses videos frame by frame, merged in from
+[ReverseVideo](https://github.com/mikecastrodemaria/ReverseVideo).
+
+1. Drop one or several videos onto **Videos** (batch is supported).
+2. Tick **Keep extracted frames** to also get every frame as a JPEG, shown in
+   the gallery under the previews.
+3. Pick a **Combine** mode: `none` for the reversed clip only, `ab` for original
+   then reversed, `ba` for reversed then original.
+4. Press **Reverse**. The original, the reversed clip and the combined clip are
+   previewed side by side, and the status box reports each file separately - one
+   bad file does not abort the batch.
+
+Frames are spooled to a temporary directory as lossless PNG rather than held in
+memory, so a long or high-resolution video does not depend on free RAM.
+
+### Command line
+
+Reversing also works without the browser:
+
+```bash
+# One video
+python app.py --reverse clip.webm
+
+# A batch, keeping the frames, with the original and reversed joined
+python app.py --reverse a.mp4 b.webm --keep-frames --video-loop ab --output-dir out/
+
+# Start the web UI on another port, without opening a browser
+python app.py --port 8000 --no-browser
+```
+
+`python app.py --help` lists every option. The exit code is non-zero if any
+input failed.
 
 ## ⚙️ Configuration
 
