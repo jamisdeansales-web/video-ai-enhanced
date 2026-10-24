@@ -421,6 +421,29 @@ neither means the whole video.
 `python app.py --help` lists every option. The exit code is non-zero if any
 input failed.
 
+### 📁 Output folder
+
+The **Processing**, **Export Frames** and **Reverse** tabs each have an *Output
+folder* box. Leave it empty and results go where they always did, under the
+system temp folder:
+
+| Action | Default |
+|--------|---------|
+| Upscale | `%TEMP%\video_upscaler_outputs\` |
+| Export frames | `%TEMP%\video_frame_exports\<video name>\` |
+| Reverse | `%TEMP%\video_reverser_outputs\` |
+| Model weights | `%LOCALAPPDATA%\video-upscaler-pro\models\` |
+
+Windows cleans `%TEMP%` out on its own, so set a folder for anything you want
+to keep. The field accepts `~/Videos`, `%USERPROFILE%\Videos`, a path in
+quotes, and relative paths (resolved against where the app was started). The
+folder is created if missing, and checked for writability *before* a long job
+starts rather than failing partway through; if it cannot be used, the tab says
+why and nothing runs.
+
+The destination is printed in the status box after each run, and the CLI has
+`--output-dir` for `--reverse` and `--export-frames`.
+
 ### 💾 Output codec
 
 Under **Output** in the Processing tab:

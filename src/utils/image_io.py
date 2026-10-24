@@ -82,6 +82,46 @@ def imread(path: str, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndarray]:
     return cv2.imdecode(data, flags)
 
 
+def resolve_output_dir(user_value: Optional[str], fallback_subdir: str) -> str:
+    """
+    Turn whatever the user typed into a usable output directory.
+
+    An empty value falls back to a named folder under the system temp
+    directory, which is where everything used to go unconditionally.
+
+    Expands ~ and environment variables, so "%USERPROFILE%\\Videos" and
+    "~/Videos" both work, and makes the result absolute: a relative path would
+    otherwise land wherever the app happens to have been started from.
+
+    Args:
+        user_value: The folder the user asked for, possibly blank.
+        fallback_subdir: Name under the temp directory when nothing was asked.
+
+    Returns:
+        An absolute, writable directory, created if needed.
+
+    Raises:
+        OSError: If the directory cannot be created or written to, with the
+            underlying reason attached.
+    """
+    import tempfile
+
+    cleaned = (user_value or '').strip().strip('"')
+
+    if cleaned:
+        directory = os.path.abspath(
+            os.path.expanduser(os.path.expandvars(cleaned))
+        )
+    else:
+        directory = os.path.join(tempfile.gettempdir(), fallback_subdir)
+
+    problem = check_writable(directory)
+    if problem:
+        raise OSError('%s. Choose another output folder.' % problem)
+
+    return directory
+
+
 def check_writable(directory: str) -> Optional[str]:
     """
     Check that a directory can be created and written to.

@@ -30,6 +30,7 @@ from processors.spatial_upscaler import create_upscaler
 from processors.temporal_interpolator import create_interpolator
 from processors.video_reverser import COMBINE_MODES, reverse_batch
 from processors.frame_exporter import IMAGE_FORMATS, clear_export_dir, export_frames
+from utils.image_io import resolve_output_dir
 from utils.quality_metrics import compare_videos, format_metric_rows
 
 # Global state
@@ -312,7 +313,8 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
         return None, f"❌ Error: {str(e)}"
 
 
-def process_reverse(files, keep_frames, combine_mode, progress=gr.Progress()):
+def process_reverse(files, keep_frames, combine_mode, output_folder=None,
+                    progress=gr.Progress()):
     """
     Reverse one or more uploaded videos.
 
@@ -330,10 +332,16 @@ def process_reverse(files, keep_frames, combine_mode, progress=gr.Progress()):
     def on_progress(index, total, name):
         progress((index - 1) / total, desc=f"Reversing {name} ({index}/{total})")
 
+    try:
+        output_dir = resolve_output_dir(output_folder, "video_reverser_outputs")
+    except OSError as exc:
+        return f"❌ {exc}", None, None, None, []
+
     results = reverse_batch(
         paths,
         combine_mode=combine_mode,
         keep_frames=keep_frames,
+        output_dir=output_dir,
         progress_callback=on_progress,
     )
 
@@ -354,6 +362,7 @@ def process_reverse(files, keep_frames, combine_mode, progress=gr.Progress()):
     summary = f"{len(succeeded)}/{len(results)} reversed"
     if failed:
         summary += f", {len(failed)} failed"
+    summary += f"\n📁 {output_dir}"
     report = summary + "\n\n" + "\n".join(lines)
 
     if not succeeded:
@@ -379,7 +388,7 @@ GALLERY_PREVIEW_LIMIT = 60
 def process_export_frames(
     video, range_mode, start_time, end_time, every_n,
     image_format, jpeg_quality, upscale, scale, make_zip,
-    progress=gr.Progress(),
+    output_folder=None, progress=gr.Progress(),
 ):
     """Export a video's frames as stills, optionally upscaling each one."""
     if video is None:
@@ -390,9 +399,13 @@ def process_export_frames(
 
     # Each run starts from an empty folder so a shorter range cannot leave
     # stills from a previous, longer one behind.
-    output_dir = os.path.join(
-        tempfile.gettempdir(), "video_frame_exports", Path(video).stem
-    )
+    try:
+        output_dir = os.path.join(
+            resolve_output_dir(output_folder, "video_frame_exports"),
+            Path(video).stem,
+        )
+    except OSError as exc:
+        return f"❌ {exc}", [], None
     clear_export_dir(output_dir)
 
     try:
@@ -435,7 +448,7 @@ def process_export_frames(
 
 def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mult, temporal,
                        codec=DEFAULT_CODEC, crf=DEFAULT_CRF, measure_quality=False,
-                       progress=gr.Progress()):
+                       output_folder=None, progress=gr.Progress()):
     """Process full video"""
     global current_upscaler
 
@@ -478,8 +491,12 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
         logger.info(f"Estimated processing time: {estimated_time}")
 
         # Create output path
-        output_dir = Path(tempfile.gettempdir()) / "video_upscaler_outputs"
-        output_dir.mkdir(exist_ok=True)
+        try:
+            output_dir = Path(
+                resolve_output_dir(output_folder, "video_upscaler_outputs")
+            )
+        except OSError as exc:
+            return None, f"❌ {exc}", [], None, None
 
         input_name = Path(video).stem
         output_path = str(output_dir / f"{input_name}_upscaled_{scale}x.mp4")
@@ -506,7 +523,8 @@ def process_full_video(video, model, scale, interp_enabled, interp_model, fps_mu
             status += f"⏱️ Total time: {metrics['total_time']:.1f}s ({metrics['total_time']/60:.1f} min)\n"
             status += f"🎬 Frames: {metrics['frames_processed']:,}\n"
             status += f"📐 Resolution: {metrics['input_resolution']} → {metrics['output_resolution']}\n"
-            status += f"⚡ Speed: {metrics['avg_time_per_frame']:.3f}s per frame"
+            status += f"⚡ Speed: {metrics['avg_time_per_frame']:.3f}s per frame\n"
+            status += f"📁 Saved to: {output_dir}"
 
             # Metrics table
             metrics_data = [
@@ -647,6 +665,12 @@ def create_interface():
                                 value=False,
                                 info="Adds a pass over the result; see the Comparison tab",
                             )
+                            process_output_folder = gr.Textbox(
+                                label="📁 Output folder",
+                                placeholder="Leave empty for the system temp folder",
+                                info="%TEMP% is cleaned up by Windows; set a folder to keep results",
+                            )
+
 
                         # CRF means nothing to the OpenCV FourCC writer.
                         output_codec.change(
@@ -778,6 +802,12 @@ def create_interface():
                             label="🔁 Combine original and reversed",
                             info="none = reversed only, ab = original then reversed, ba = reversed then original",
                         )
+                        reverse_output_folder = gr.Textbox(
+                            label="📁 Output folder",
+                            placeholder="Leave empty for the system temp folder",
+                            info="%TEMP% is cleaned up by Windows; set a folder to keep results",
+                        )
+
                         with gr.Row():
                             reverse_clear_btn = gr.Button("Clear")
                             reverse_btn = gr.Button("🔁 Reverse", variant="primary")
@@ -868,6 +898,12 @@ def create_interface():
                                 label="📦 Also bundle the frames into a zip",
                                 value=True,
                             )
+                            export_output_folder = gr.Textbox(
+                                label="📁 Output folder",
+                                placeholder="Leave empty for the system temp folder",
+                                info="%TEMP% is cleaned up by Windows; set a folder to keep results",
+                            )
+
 
                         with gr.Group():
                             gr.Markdown("### ⚙️ Upscaling")
@@ -1017,6 +1053,7 @@ def create_interface():
                 export_upscale,
                 export_scale,
                 export_zip,
+                export_output_folder,
             ],
             outputs=[export_status, export_gallery, export_zip_file],
         )
@@ -1024,7 +1061,12 @@ def create_interface():
         # Reverse tab
         reverse_btn.click(
             fn=process_reverse,
-            inputs=[reverse_input, reverse_keep_frames, reverse_combine],
+            inputs=[
+                reverse_input,
+                reverse_keep_frames,
+                reverse_combine,
+                reverse_output_folder,
+            ],
             outputs=[
                 reverse_status,
                 reverse_original,
@@ -1103,7 +1145,8 @@ def create_interface():
                 temporal_method,
                 output_codec,
                 output_crf,
-                measure_quality
+                measure_quality,
+                process_output_folder
             ],
             outputs=[
                 video_output,
