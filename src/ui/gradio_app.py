@@ -111,6 +111,13 @@ def allow_output_path(path):
         pass
 
 
+def parse_interpolation_choice(label):
+    """Map the interpolation dropdown label to a model name."""
+    if label and 'Cross-fade' in label:
+        return 'simple'
+    return 'rife'
+
+
 def build_upscaler(model_name, scale, device='auto',
                    codec=DEFAULT_CODEC, crf=DEFAULT_CRF):
     """Create the right upscaler for the chosen model."""
@@ -297,7 +304,7 @@ def process_preview(video, model, scale, interp_enabled, interp_model, fps_mult,
             progress(0.55, desc="Loading interpolation model...")
 
             interpolator = create_interpolator(
-                model_name='rife',  # Using RIFE
+                model_name=parse_interpolation_choice(interp_model),
                 device='auto'
             )
 
@@ -869,11 +876,15 @@ def create_interface():
                             )
 
                             interpolation_model = gr.Dropdown(
-                                choices=["RIFE (Fast - Optical Flow)", "DAIN (Maximum Quality) - Coming Soon"],
+                                choices=[
+                                    "RIFE (AI, recommended)",
+                                    "Cross-fade (no motion estimation)",
+                                ],
                                 label="Interpolation Model",
-                                value="RIFE (Fast - Optical Flow)",
+                                value="RIFE (AI, recommended)",
                                 visible=False,
-                                interactive=True
+                                interactive=True,
+                                info="RIFE estimates motion between frames; cross-fade just blends them",
                             )
 
                             fps_multiplier = gr.Slider(

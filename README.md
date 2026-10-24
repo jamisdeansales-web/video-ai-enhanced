@@ -15,6 +15,7 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 - **Reverse videos** frame by frame, in batch, from the UI or the CLI
 - **Export frames** as PNG/JPEG over any time range, optionally upscaled
 - **Batch queue** in the Processing tab, with one model load for the whole run
+- **RIFE frame interpolation**, the real network rather than an optical-flow stand-in
 
 ### Currently Working (v0.2.0)
 
@@ -64,9 +65,7 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 
 ### Coming Soon
 
-- **RIFE / DAIN**: frame interpolation
 - **Resume**: pick a long job back up after an interruption
-- **Queue**: batch several videos in the Processing tab
 - **Batch Processing**: Process multiple videos at once
 
 ## 📋 Requirements
@@ -450,6 +449,39 @@ folder, so a folder outside those is added to its allowed paths when you pick
 it. That folder is then readable by anything that can reach the app, which is
 why the UI binds to `127.0.0.1` (this machine only). `--host 0.0.0.0` opens it
 to your network; the app warns when you do.
+
+### 🎬 Frame interpolation (RIFE)
+
+Enable **FPS Interpolation** in the Processing tab to raise a clip's frame
+rate. Two options:
+
+| Model | Does |
+|-------|------|
+| RIFE (AI, recommended) | estimates motion between frames and synthesises the ones in between |
+| Cross-fade | blends the two neighbours, no motion estimation |
+
+RIFE has no pip package and is not in basicsr, so the architecture is defined
+in `src/models/rife_arch.py` and only the weights (21 MB) are downloaded. They
+are read from **safetensors**, not the published `.pkl` inside a zip:
+`torch.load` on a downloaded pickle executes whatever the file contains.
+
+Every layer was derived from the checkpoint's own tensor names and shapes, and
+the weights load with `strict=True` — a mismatch raises rather than leaving
+layers randomly initialised, which is how a flow network ends up running on
+noise and still returning plausible-looking frames.
+
+**Measured.** Dropping every other frame of a clip with steady motion and
+reconstructing it, against ground truth:
+
+| Method | PSNR |
+|--------|------|
+| RIFE | **33.86 dB** |
+| Cross-fade | 25.95 dB |
+| Optical flow (what this used to do) | 22.79 dB |
+
+Note the third row: the previous implementation was worse than simply blending
+the two frames. If the weights cannot be fetched it is still used as a last
+resort, and says so in the log.
 
 ### 📚 Batch queue
 

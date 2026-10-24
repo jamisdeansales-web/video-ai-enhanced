@@ -54,6 +54,14 @@ MODEL_URLS = {
     # BasicVSR++ for temporal coherence. The architecture is in basicsr, but
     # these weights are published by mmediting and use its module names;
     # remap_state_dict in src/models/basicvsrpp_model.py translates them.
+    # RIFE frame interpolation. safetensors rather than the author's .pkl
+    # inside a zip: torch.load on a downloaded pickle runs whatever the file
+    # contains. The architecture is in src/models/rife_arch.py.
+    'rife_flownet': {
+        'url': 'https://huggingface.co/imaginairy/rife-interpolation/resolve/main/rife-flownet-4.13.2.safetensors',
+        'filename': 'rife-flownet-4.13.2.safetensors',
+        'md5': None,
+    },
     'basicvsrpp_reds': {
         'url': 'https://download.openmmlab.com/mmediting/restorers/basicvsr_plusplus/basicvsr_plusplus_c64n7_8x1_600k_reds4_20210217-db622b2f.pth',
         'filename': 'basicvsr_plusplus_c64n7_8x1_600k_reds4.pth',
