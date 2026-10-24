@@ -55,7 +55,13 @@ class TemporalInterpolator:
                     device=self.device,
                     fp16=self.sys_manager.optimal_settings.get('use_fp16', True)
                 )
-                logger.info("RIFE interpolation model loaded (using optical flow fallback)")
+                if getattr(self.model, 'using_rife', False):
+                    logger.info("RIFE interpolation model loaded")
+                else:
+                    logger.warning(
+                        "RIFE weights unavailable; interpolating with optical "
+                        "flow, which is markedly worse"
+                    )
 
             elif self.model_name.lower() == 'simple':
                 self.model = SimpleFrameInterpolator(device=self.device)

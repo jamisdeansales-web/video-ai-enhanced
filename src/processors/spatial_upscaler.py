@@ -11,7 +11,14 @@ import logging
 
 from models.realesrgan_model import create_realesrgan_model
 from utils.cancellation import OperationCancelled, check as check_cancelled
-from utils.video_processor import DEFAULT_CODEC, DEFAULT_CRF, VideoProcessor, VideoWriter
+from utils.resume import DEFAULT_SEGMENT_FRAMES, ResumableJob
+from utils.video_processor import (
+    DEFAULT_CODEC,
+    DEFAULT_CRF,
+    FFMPEG_BIN,
+    VideoProcessor,
+    VideoWriter,
+)
 from utils.system_manager import get_system_manager
 
 logger = logging.getLogger(__name__)
@@ -126,7 +133,9 @@ class SpatialUpscaler:
         output_path: str,
         start_frame: int = 0,
         end_frame: Optional[int] = None,
-        progress_callback: Optional[Callable[[int, int, float], None]] = None
+        progress_callback: Optional[Callable[[int, int, float], None]] = None,
+        resume: bool = True,
+        segment_frames: int = DEFAULT_SEGMENT_FRAMES
     ) -> Dict:
         """
         Upscale a video
@@ -137,6 +146,9 @@ class SpatialUpscaler:
             start_frame: Starting frame index
             end_frame: Ending frame index (None = all frames)
             progress_callback: Optional callback(current_frame, total_frames, eta)
+            resume: Write the output in segments so an interrupted run can be
+                picked up where it stopped. Requires ffmpeg to join them.
+            segment_frames: Frames per segment.
 
         Returns:
             dict: Processing results with 'success', 'output_path', 'metrics'
@@ -190,54 +202,137 @@ class SpatialUpscaler:
                     if not sufficient:
                         logger.warning("Insufficient VRAM, but will try anyway...")
 
-                # Open output video writer
-                with VideoWriter(
-                    output_path,
-                    fps=metadata['fps'],
-                    resolution=(output_width, output_height),
-                    audio_source=input_path,
-                    codec=self.codec,
-                    crf=self.crf
-                ) as writer:
+                # Resume needs ffmpeg to join the segments afterwards;
+                # without it, fall back to writing one file in one pass.
+                job = None
+                resume_from = 0
+                if resume and FFMPEG_BIN:
+                    job = ResumableJob(
+                        input_path, output_path,
+                        params={
+                            'scale': self.scale_factor,
+                            'model': self.model_name,
+                            'codec': self.codec,
+                            'crf': self.crf,
+                            'start_frame': start_frame,
+                            'end_frame': end_frame,
+                        },
+                        segment_frames=segment_frames,
+                    )
+                    resume_from = job.prepare()
+                    if resume_from >= total_frames:
+                        # Everything was already encoded last time; all that
+                        # is left is joining the pieces.
+                        logger.info("All segments already present, joining them")
+                        if job.concatenate(FFMPEG_BIN, audio_source=input_path):
+                            job.cleanup()
+                            total_time = time.time() - start_time
+                            return {
+                                'success': True,
+                                'output_path': output_path,
+                                'metrics': {
+                                    'total_time': total_time,
+                                    'frames_processed': total_frames,
+                                    'avg_time_per_frame': 0.0,
+                                    'input_resolution': f"{metadata['width']}x{metadata['height']}",
+                                    'output_resolution': f"{output_width}x{output_height}",
+                                    'scale_factor': self.scale_factor,
+                                    'resumed_from': resume_from,
+                                },
+                            }
+                        resume_from = 0
+                elif resume:
+                    logger.warning(
+                        "ffmpeg not available, so this run cannot be resumed "
+                        "if it is interrupted"
+                    )
 
-                    # Process frames
-                    processed_count = 0
-                    frame_times = []
+                processed_count = resume_from
+                frame_times = []
+                writer = None
+                segment_index = job.next_index() if job else 0
+                frames_in_segment = 0
 
-                    for frame_idx, frame in vp.extract_frames(start_frame, end_frame):
+                def open_writer(path, audio):
+                    return VideoWriter(
+                        path,
+                        fps=metadata['fps'],
+                        resolution=(output_width, output_height),
+                        audio_source=audio,
+                        codec=self.codec,
+                        crf=self.crf,
+                    )
+
+                try:
+                    if job is None:
+                        writer = open_writer(output_path, input_path)
+                    else:
+                        writer = open_writer(job.segment_path(segment_index), None)
+
+                    for frame_idx, frame in vp.extract_frames(
+                        start_frame + resume_from, end_frame
+                    ):
                         # Between frames: responsive without costing throughput.
                         check_cancelled()
                         frame_start = time.time()
 
-                        # Upscale frame
                         upscaled = self._upscale_frame(frame)
-
-                        # Write frame
                         writer.write_frame(upscaled)
+                        frames_in_segment += 1
+
+                        # Close the segment on its boundary and record it, so
+                        # an interruption after this point cannot lose it.
+                        if job is not None and frames_in_segment >= job.segment_frames:
+                            writer.close(copy_audio=False)
+                            job.record(segment_index, frames_in_segment)
+                            segment_index += 1
+                            frames_in_segment = 0
+                            writer = open_writer(job.segment_path(segment_index), None)
 
                         processed_count += 1
                         frame_time = time.time() - frame_start
                         frame_times.append(frame_time)
 
-                        # Calculate ETA
-                        if len(frame_times) > 0:
-                            avg_time = sum(frame_times[-30:]) / min(len(frame_times), 30)  # Rolling average
+                        if frame_times:
+                            avg_time = sum(frame_times[-30:]) / min(len(frame_times), 30)
                             remaining_frames = total_frames - processed_count
                             eta = remaining_frames * avg_time
                         else:
                             eta = 0
 
-                        # Progress callback
                         if progress_callback and processed_count % 10 == 0:
                             progress_callback(processed_count, total_frames, eta)
 
-                        # Log progress
                         if processed_count % 100 == 0:
-                            logger.info(f"Processed {processed_count}/{total_frames} frames ({processed_count/total_frames*100:.1f}%)")
+                            logger.info(
+                                f"Processed {processed_count}/{total_frames} frames "
+                                f"({processed_count/total_frames*100:.1f}%)"
+                            )
 
-                        # Clear cache periodically
                         if processed_count % 50 == 0:
                             self.model.clear_cache()
+
+                    if writer is not None:
+                        writer.close(copy_audio=job is None)
+                        if job is not None and frames_in_segment:
+                            job.record(segment_index, frames_in_segment)
+                        writer = None
+                finally:
+                    # On a stop or a crash the segments already recorded stay
+                    # on disk; only the one in flight is lost.
+                    if writer is not None:
+                        try:
+                            writer.close(copy_audio=False)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                if job is not None:
+                    if not job.concatenate(FFMPEG_BIN, audio_source=input_path):
+                        raise RuntimeError(
+                            "Could not join the encoded segments; they are kept "
+                            "in %s" % job.work_dir
+                        )
+                    job.cleanup()
 
             # Calculate metrics
             total_time = time.time() - start_time
@@ -254,7 +349,8 @@ class SpatialUpscaler:
                     'avg_time_per_frame': total_time / processed_count if processed_count > 0 else 0,
                     'input_resolution': f"{metadata['width']}x{metadata['height']}",
                     'output_resolution': f"{output_width}x{output_height}",
-                    'scale_factor': self.scale_factor
+                    'scale_factor': self.scale_factor,
+                    'resumed_from': resume_from,
                 }
             }
 

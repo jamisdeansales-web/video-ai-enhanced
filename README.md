@@ -14,6 +14,9 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 
 - **Reverse videos** frame by frame, in batch, from the UI or the CLI
 - **Export frames** as PNG/JPEG over any time range, optionally upscaled
+- **Batch queue** in the Processing tab, with one model load for the whole run
+- **RIFE frame interpolation**, the real network rather than an optical-flow stand-in
+- **Resume** an interrupted upscale instead of starting over
 
 ### Currently Working (v0.2.0)
 
@@ -63,9 +66,7 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 
 ### Coming Soon
 
-- **RIFE / DAIN**: frame interpolation
-- **Resume**: pick a long job back up after an interruption
-- **Queue**: batch several videos in the Processing tab
+Nothing currently planned.
 - **Batch Processing**: Process multiple videos at once
 
 ## 📋 Requirements
@@ -449,6 +450,81 @@ folder, so a folder outside those is added to its allowed paths when you pick
 it. That folder is then readable by anything that can reach the app, which is
 why the UI binds to `127.0.0.1` (this machine only). `--host 0.0.0.0` opens it
 to your network; the app warns when you do.
+
+### 🎬 Frame interpolation (RIFE)
+
+Enable **FPS Interpolation** in the Processing tab to raise a clip's frame
+rate. Two options:
+
+| Model | Does |
+|-------|------|
+| RIFE (AI, recommended) | estimates motion between frames and synthesises the ones in between |
+| Cross-fade | blends the two neighbours, no motion estimation |
+
+RIFE has no pip package and is not in basicsr, so the architecture is defined
+in `src/models/rife_arch.py` and only the weights (21 MB) are downloaded. They
+are read from **safetensors**, not the published `.pkl` inside a zip:
+`torch.load` on a downloaded pickle executes whatever the file contains.
+
+Every layer was derived from the checkpoint's own tensor names and shapes, and
+the weights load with `strict=True` — a mismatch raises rather than leaving
+layers randomly initialised, which is how a flow network ends up running on
+noise and still returning plausible-looking frames.
+
+**Measured.** Dropping every other frame of a clip with steady motion and
+reconstructing it, against ground truth:
+
+| Method | PSNR |
+|--------|------|
+| RIFE | **33.86 dB** |
+| Cross-fade | 25.95 dB |
+| Optical flow (what this used to do) | 22.79 dB |
+
+Note the third row: the previous implementation was worse than simply blending
+the two frames. If the weights cannot be fetched it is still used as a last
+resort, and says so in the log.
+
+### 📚 Batch queue
+
+The Processing tab takes a **Batch queue**: drop several videos in and they are
+upscaled one after another. When the queue is not empty the single video input
+above it is ignored, since filling the queue is the more explicit choice.
+
+The model is loaded **once** for the whole batch rather than per file, which is
+most of the saving on a long queue.
+
+One bad file does not end the run: it is reported on its own line and the queue
+carries on. The status box summarises every file, the Comparison tab and the
+player show the last one that succeeded, and **Stop** ends the whole queue, not
+just the file in flight.
+
+### ♻️ Resuming an interrupted upscale
+
+A long upscale that is stopped, crashes, or loses power used to start again
+from frame zero. With **Resume an interrupted run** ticked (the default), the
+output is written in segments of 200 frames and joined at the end; a rerun
+with the same inputs keeps the finished segments and carries on from the first
+frame that is missing.
+
+Segments rather than a cache of individual frames: at 4K a PNG is 8-25 MB, so
+caching a ten-minute clip frame by frame would need hundreds of gigabytes. The
+segments are encoded with the same codec as the final file, so they cost about
+what the output costs, and joining them copies the streams rather than
+re-encoding.
+
+A job is identified by what would change its result — the input file with its
+size and mtime, the scale, the model, the codec and the quality. Change any of
+them and it is a new job with its own segments, so edited inputs or different
+settings never resume onto mismatched work. A segment that was being written
+when the process died is discarded rather than trusted.
+
+Partial work lives in `.v2up_resume/` beside the output and is removed once
+the final file exists. Resume needs ffmpeg to join the segments; without it
+the app says so and writes in one pass as before.
+
+Measured on a 125-frame clip with audio: interrupted at 3.3s, rerun finished
+in 13.8s against 19.0s from scratch, resuming at frame 20, producing the same
+125 frames with the audio intact.
 
 ### ⏹️ Stopping a job
 
