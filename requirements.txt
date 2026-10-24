@@ -1,8 +1,14 @@
-# Core dependencies - Windows 11 & RTX 5090 optimized
-# PyTorch with CUDA 12.6 for RTX 50-series support
-# Install via: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-torch>=2.5.0
-torchvision>=0.20.0
+# Runtime dependencies for Video Upscaler Pro - Windows 11 & RTX 50-series ready.
+#
+# torch and torchvision are deliberately NOT listed here: install.bat and
+# install.sh install them first from the PyTorch wheel index that matches the
+# local GPU (scripts/detect_cuda.py), because a wheel built for older
+# architectures installs cleanly and then refuses to run. cu128 is required for
+# Blackwell / RTX 50xx (sm_120); cu124 covers everything up to Hopper.
+#
+# basicsr and realesrgan are installed separately too, with
+# --no-build-isolation, because basicsr only ships an sdist whose setup.py
+# imports torch.
 
 # UI Framework
 gradio>=4.44.0
@@ -10,14 +16,10 @@ gradio>=4.44.0
 # Image/Video Processing
 opencv-python>=4.10.0
 pillow>=10.4.0
-numpy>=1.24.0,<2.0.0  # Pin for compatibility
+numpy>=1.24.0,<2.0.0  # basicsr and realesrgan are not numpy 2 compatible
 imageio-ffmpeg>=0.5.1
 moviepy>=1.0.3
 decorator>=5.1.1
-
-# AI Model Support
-basicsr>=1.4.2
-realesrgan>=0.3.0
 
 # System utilities
 psutil>=6.0.0
@@ -28,14 +30,9 @@ orjson>=3.10.7  # Fixed: requires stable Python (not beta)
 # Quality metrics
 scikit-image>=0.24.0
 
-# Additional AI dependencies
+# basicsr build/runtime requirements
 tb-nightly
 yapf
 lmdb
 addict
 future
-
-# Development dependencies (optional)
-pytest>=8.0.0
-black>=24.0.0
-flake8>=7.0.0

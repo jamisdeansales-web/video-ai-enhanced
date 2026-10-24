@@ -1,42 +1,66 @@
 @echo off
 REM Video Upscaler Pro - Start Script for Windows
+setlocal enabledelayedexpansion
 
 echo ========================================
 echo Video Upscaler Pro
 echo ========================================
 echo.
 
-REM Check if virtual environment exists
-if not exist venv (
-    echo ERROR: Virtual environment not found
-    echo Please run install.bat first
+cd /d "%~dp0"
+
+REM Run the venv interpreter directly instead of activating. activate.bat only
+REM prepends to PATH, so if it fails the app would silently run on the system
+REM Python and report confusing missing-dependency errors.
+set "VENV_PY=%CD%\venv\Scripts\python.exe"
+
+if not exist "!VENV_PY!" (
+    echo ERROR: no virtual environment found at venv\Scripts\python.exe
+    echo.
+    echo Please run install.bat first.
+    echo.
     pause
     exit /b 1
 )
 
-REM Activate virtual environment
-echo Activating virtual environment...
-call venv\Scripts\activate.bat
-
-REM Check if app.py exists
 if not exist app.py (
-    echo ERROR: app.py not found
-    echo The application may not be properly installed
+    echo ERROR: app.py not found in %CD%
+    echo Run start.bat from the project folder.
+    echo.
     pause
     exit /b 1
 )
 
-REM Start the application
+REM A venv whose dependencies never installed is the common broken state, and
+REM "ModuleNotFoundError: gradio" is not a helpful thing to show for it.
+"!VENV_PY!" -c "import gradio, torch, cv2, numpy" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: the virtual environment is missing its dependencies.
+    echo.
+    echo The installation did not finish. Please run install.bat again.
+    echo For a full report, run:
+    echo   venv\Scripts\python.exe scripts\verify_install.py
+    echo.
+    pause
+    exit /b 1
+)
+
 echo Starting Video Upscaler Pro...
 echo.
 echo The application will open in your browser automatically.
-echo To stop the application, press Ctrl+C in this window.
+echo If it does not, visit http://localhost:7860
 echo.
-python app.py
+echo Press Ctrl+C in this window to stop it.
+echo.
 
-REM If app exits, pause to show any error messages
-if %errorlevel% neq 0 (
+"!VENV_PY!" app.py
+set "EXIT_CODE=!errorlevel!"
+
+if not "!EXIT_CODE!"=="0" (
     echo.
-    echo ERROR: Application exited with error code %errorlevel%
+    echo ERROR: the application exited with code !EXIT_CODE!
+    echo.
     pause
 )
+
+exit /b !EXIT_CODE!

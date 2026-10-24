@@ -56,19 +56,48 @@ Open source video upscaling application using AI models like Real-ESRGAN, SwinIR
 ## 📋 Requirements
 
 ### Minimum Requirements (CPU Mode)
-- **Python 3.10, 3.11, or 3.12 (RECOMMENDED)** ⚠️ Python 3.13 has compatibility issues
+- **Python 3.10, 3.11 or 3.12** (a final release, not an alpha/beta/rc)
 - 32 GB RAM
 - Intel i7 / AMD Ryzen 7 or better (8+ cores)
 - 50 GB free disk space
 
 ### Recommended Requirements (GPU Mode)
-- **Python 3.10, 3.11, or 3.12 (RECOMMENDED)** ⚠️ Python 3.13 has compatibility issues
+- **Python 3.10, 3.11 or 3.12** (a final release, not an alpha/beta/rc)
 - 16 GB RAM (32 GB recommended)
 - NVIDIA GPU with 12+ GB VRAM (RTX 3060 or better)
 - 50 GB free disk space
-- CUDA 11.8 or higher (for NVIDIA GPU acceleration)
+- An NVIDIA driver recent enough for the CUDA build the installer picks
 
-**⚠️ Python 3.13 Compatibility**: Python 3.13 has known issues with AI model dependencies (BasicSR). Please use Python 3.10-3.12 for the best experience. If you must use Python 3.13, see [PYTHON_313_WORKAROUND.md](PYTHON_313_WORKAROUND.md) for manual installation instructions.
+### Python version
+
+The installer probes `py -3.12`, `py -3.11`, `py -3.10` and then `python`, and
+uses the first one that passes `scripts/check_python.py`. It deliberately skips:
+
+- **Python 3.13+** - BasicSR needs `numpy < 2`, which has no wheels for 3.13
+  (details in [PYTHON_313_WORKAROUND.md](PYTHON_313_WORKAROUND.md)).
+- **Pre-releases** - for example 3.12.0b3, whose `re` module makes any modern
+  pip crash with `InvalidVersion: Invalid version: '0.dev0'`.
+- **MSYS2 / MinGW Python** - it cannot install the official PyTorch wheels.
+
+If none of your interpreters qualify, the installer prints which ones it
+rejected and why. Install Python 3.12 from
+[python.org](https://www.python.org/downloads/release/python-31210/) and tick
+"Add Python to PATH".
+
+### CUDA build
+
+`scripts/detect_cuda.py` reads the GPU's compute capability and picks the
+matching PyTorch wheel index:
+
+| GPU | Wheels |
+|-----|--------|
+| Blackwell / RTX 50xx (sm_120) | `cu128` |
+| Hopper and older (sm_90 and below) | `cu124` |
+| No NVIDIA GPU | CPU wheels |
+
+This matters: the `cu124` wheels carry no kernels above sm_90, so on an RTX 50xx
+they install cleanly and then refuse to run with *"sm_120 is not compatible with
+the current PyTorch installation"*.
 
 ### Supported Platforms
 - ✅ Windows 10/11
@@ -157,20 +186,27 @@ brew install ffmpeg
 If the automatic installer doesn't work, you can install manually:
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
+# Create the virtual environment with a supported interpreter
+py -3.12 -m venv venv          # Windows
+python3.12 -m venv venv        # Linux/macOS
 
-# Activate virtual environment
-# On Windows:
-venv\Scripts\activate.bat
-# On Linux/macOS:
-source venv/bin/activate
+# Call the venv interpreter directly, so a failed activation cannot
+# silently install into the system Python instead
+venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
 
-# Upgrade pip
-pip install --upgrade pip
+# Install PyTorch for your GPU FIRST (cu128 for RTX 50xx, cu124 otherwise)
+venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
-# Install dependencies
-pip install -r requirements.txt
+# Then everything else
+venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# basicsr only ships an sdist whose setup.py imports torch, so it has to be
+# built against the venv rather than pip's isolated build environment
+venv\Scripts\python.exe -m pip install --no-build-isolation basicsr realesrgan
+venv\Scripts\python.exe scripts\patch_basicsr.py
+
+# Check the result
+venv\Scripts\python.exe scripts\verify_install.py
 ```
 
 ## 🎮 Usage
@@ -283,9 +319,25 @@ output_quality: 18  # CRF value
 
 #### "ModuleNotFoundError"
 **Solution**:
+- Get a full report of what is and is not installed:
+  `venv\Scripts\python.exe scripts\verify_install.py`
 - Run the installer again: `install.bat` or `./install.sh`
-- Ensure virtual environment is activated
-- Check Python version: `python --version` (must be 3.10+)
+
+#### "sm_120 is not compatible with the current PyTorch installation"
+PyTorch was built for older GPUs than the one you have - typically an RTX 50xx
+with `cu124` wheels. Re-run `install.bat`: it picks the CUDA build from the
+GPU's compute capability.
+
+#### "InvalidVersion: Invalid version: '0.dev0'" during installation
+The venv was built with a pre-release Python such as 3.12.0b3, whose `re` module
+breaks modern pip. Re-run `install.bat`: it skips pre-releases and prints which
+interpreter it chose.
+
+#### Real-ESRGAN unavailable / upscaling falls back to interpolation
+`import basicsr` fails because basicsr 1.4.2 imports
+`torchvision.transforms.functional_tensor`, which torchvision removed in 0.17.
+Run `venv\Scripts\python.exe scripts\patch_basicsr.py` to repoint it at the
+public `torchvision.transforms.functional`.
 
 #### Application won't start
 **Solution**:
